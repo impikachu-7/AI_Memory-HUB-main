@@ -57,7 +57,19 @@ function ChatPage() {
       const settings = await api.settings.get();
       setMemoryEnabled(settings.memory_enabled && settings.memory_retrieval_mode !== "off");
 
-      setAvailableModels(mods);
+      let mergedModels = mods.filter((model) => !(model.provider === "ollama" && model.model_key === "ollama/local"));
+      try {
+        const local = await api.localConnector.models();
+        if (local.models.length) {
+          const registered = await api.providers.registerLocalModels(
+            local.models.map((model) => ({ model_key: model.name, display_name: model.name }))
+          );
+          mergedModels = [...mergedModels, ...registered];
+        }
+      } catch (error) {
+        console.warn("Local Ollama models are unavailable:", error);
+      }
+      setAvailableModels(mergedModels);
 
       if (convs.length > 0) {
         // Existing conversation
@@ -148,21 +160,21 @@ function ChatPage() {
   }
 };
 
-  const send = () => {
+  const send = async () => {
     if (!messageText.trim() || !activeConvId || isGenerating) return;
     if (!selectedModel) {
       toast.error("Please select a model first (ensure a provider is connected and enabled)");
       return;
     }
-    const userPrompt = messageText;
+    const userPrompt = messageText.trim();
     setMessageText("");
     setErrorMsg("");
     setIsGenerating(true);
     setDraftResponse("");
 
-    // Optimistically append user message
+    const optimisticId = Math.random().toString();
     const userMsg: Message = {
-      id: Math.random().toString(),
+      id: optimisticId,
       conversation_id: activeConvId,
       role: "user",
       content: userPrompt,
@@ -171,6 +183,36 @@ function ChatPage() {
       created_at: new Date().toISOString(),
     };
     setMessagesList((prev) => [...prev, userMsg]);
+
+    if (selectedModel.provider === "ollama") {
+      try {
+        const prepared = await api.conversations.prepareLocalGeneration(
+          activeConvId,
+          userPrompt,
+          selectedModel.model_key,
+        );
+        await api.localConnector.chat(
+          selectedModel.model_key,
+          prepared.messages,
+          (chunk) => setDraftResponse((prev) => prev + chunk),
+        );
+        const finalText = await new Promise<string>((resolve) => {
+          setDraftResponse((current) => {
+            resolve(current);
+            return current;
+          });
+        });
+        if (!finalText.trim()) throw new Error("Ollama returned an empty response.");
+        await api.conversations.completeLocalGeneration(activeConvId, prepared.message_id, finalText);
+        setIsGenerating(false);
+        setDraftResponse("");
+        setMessagesList(await api.conversations.listMessages(activeConvId));
+      } catch (error) {
+        setIsGenerating(false);
+        setErrorMsg(error instanceof Error ? error.message : "Ollama generation failed.");
+      }
+      return;
+    }
 
     const req = {
       message: userPrompt,
@@ -187,13 +229,11 @@ function ChatPage() {
       () => {
         setIsGenerating(false);
         setDraftResponse("");
-        // Reload messages to get finalized server state
         api.conversations.listMessages(activeConvId).then(setMessagesList);
       },
       (err) => {
         setIsGenerating(false);
         setErrorMsg(err.message || "An error occurred");
-        setModelOpen(true);
       }
     );
   };
