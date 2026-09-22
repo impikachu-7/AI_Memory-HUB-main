@@ -7,7 +7,7 @@ import os
 from collections.abc import AsyncIterator
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -98,8 +98,24 @@ async def stream_chat(body: ChatRequest) -> AsyncIterator[str]:
         raise HTTPException(502, "Ollama returned an error") from exc
 
 
+async def parse_chat_request(request: Request) -> ChatRequest:
+    try:
+        payload = await request.json()
+    except Exception:
+        raw = await request.body()
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except Exception as exc:
+            raise HTTPException(400, "Invalid chat request") from exc
+    try:
+        return ChatRequest.model_validate(payload)
+    except Exception as exc:
+        raise HTTPException(422, "Invalid chat request") from exc
+
+
 @app.post("/chat")
-async def chat(body: ChatRequest):
+async def chat(request: Request):
+    body = await parse_chat_request(request)
     if body.stream:
         return StreamingResponse(stream_chat(body), media_type="application/x-ndjson")
     return await generate(body)
