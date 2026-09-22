@@ -379,7 +379,7 @@ export const api = {
       try {
         response = await localFetch(`${LOCAL_CONNECTOR_URL}/chat`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "text/plain;charset=UTF-8" },
           body: JSON.stringify({ model, messages, stream: true }),
           signal,
         });
