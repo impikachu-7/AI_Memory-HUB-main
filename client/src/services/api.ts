@@ -37,11 +37,27 @@ export function getAccessToken() {
   return accessToken;
 }
 
+async function localFetch(input: string, init: RequestInit = {}) {
+  // Chrome 142+ gates public-site -> localhost requests behind Local Network Access.
+  // Declaring the target address space lets the browser apply the intended local-network policy.
+  return fetch(input, {
+    ...init,
+    ...( { targetAddressSpace: "local" } as RequestInit & { targetAddressSpace: "local" }),
+  });
+}
+
 async function localRequest<T>(path: string): Promise<T> {
-  const response = await fetch(`${LOCAL_CONNECTOR_URL}${path}`);
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.detail || "Local AI Connector is unavailable.");
-  return payload as T;
+  try {
+    const response = await localFetch(`${LOCAL_CONNECTOR_URL}${path}`);
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.detail || "Local AI Connector is unavailable.");
+    return payload as T;
+  } catch (error) {
+    if (error instanceof TypeError) {
+      throw new Error("Browser could not access the local Ollama connector. Allow Local Network Access for ai-memory-hub-phi.vercel.app in Chrome.");
+    }
+    throw error;
+  }
 }
 
 /** The Google start route must be opened as a document navigation, not fetched. */
@@ -359,12 +375,20 @@ export const api = {
       onChunk: (text: string) => void,
       signal?: AbortSignal,
     ) => {
-      const response = await fetch(`${LOCAL_CONNECTOR_URL}/chat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model, messages, stream: true }),
-        signal,
-      });
+      let response: Response;
+      try {
+        response = await localFetch(`${LOCAL_CONNECTOR_URL}/chat`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model, messages, stream: true }),
+          signal,
+        });
+      } catch (error) {
+        if (error instanceof TypeError) {
+          throw new Error("Browser could not access the local Ollama connector. Allow Local Network Access for ai-memory-hub-phi.vercel.app in Chrome.");
+        }
+        throw error;
+      }
       if (!response.ok) {
         const payload = await response.json().catch(() => ({}));
         throw new Error(payload.detail || `Local Ollama request failed (${response.status})`);
