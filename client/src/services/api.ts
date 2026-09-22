@@ -38,11 +38,10 @@ export function getAccessToken() {
 }
 
 async function localFetch(input: string, init: RequestInit = {}) {
-  // Chrome 142+ gates public-site -> localhost requests behind Local Network Access.
-  // Declaring the target address space lets the browser apply the intended local-network policy.
+  // Chrome 142 uses this annotation to classify the loopback request before mixed-content checks.
   return fetch(input, {
     ...init,
-    ...({ targetAddressSpace: "local" } as RequestInit & { targetAddressSpace: "loopback" }),
+    ...({ targetAddressSpace: "loopback" } as RequestInit & { targetAddressSpace: "loopback" }),
   });
 }
 
@@ -379,7 +378,7 @@ export const api = {
       try {
         response = await localFetch(`${LOCAL_CONNECTOR_URL}/chat`, {
           method: "POST",
-          headers: { "Content-Type": "text/plain;charset=UTF-8" },
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ model, messages, stream: true }),
           signal,
         });

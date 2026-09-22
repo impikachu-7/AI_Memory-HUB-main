@@ -9,11 +9,18 @@ from collections.abc import AsyncIterator
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
-ALLOWED_ORIGINS = {origin.strip() for origin in os.getenv("CONNECTOR_ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:3000").split(",") if origin.strip()}
+ALLOWED_ORIGINS = {
+    origin.strip()
+    for origin in os.getenv(
+        "CONNECTOR_ALLOWED_ORIGINS",
+        "https://ai-memory-hub-phi.vercel.app,http://localhost:5173,http://localhost:3000",
+    ).split(",")
+    if origin.strip()
+}
 TIMEOUT = httpx.Timeout(float(os.getenv("CONNECTOR_TIMEOUT_SECONDS", "120")))
 app = FastAPI(title="AI Memory Hub Local Connector", version="1.0.0")
 
@@ -35,7 +42,23 @@ app.add_middleware(
 
 @app.middleware("http")
 async def add_local_network_permission_header(request, call_next):
+    origin = request.headers.get("origin")
+    if request.method == "OPTIONS" and request.headers.get("access-control-request-method"):
+        if origin not in ALLOWED_ORIGINS:
+            return Response(status_code=403)
+        response = Response(status_code=204)
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = request.headers.get(
+            "access-control-request-headers", "Content-Type"
+        )
+        if request.headers.get("access-control-request-private-network") == "true":
+            response.headers["Access-Control-Allow-Private-Network"] = "true"
+        return response
+
     response = await call_next(request)
+    if origin in ALLOWED_ORIGINS:
+        response.headers["Access-Control-Allow-Origin"] = origin
     if request.headers.get("access-control-request-private-network") == "true":
         response.headers["Access-Control-Allow-Private-Network"] = "true"
     return response
