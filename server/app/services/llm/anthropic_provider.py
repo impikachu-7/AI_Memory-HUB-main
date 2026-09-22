@@ -10,6 +10,7 @@ from collections.abc import Iterator
 from fastapi import HTTPException
 
 from app.services.llm.base import LLMProvider
+from app.services.llm.errors import provider_error
 
 log = logging.getLogger(__name__)
 
@@ -32,24 +33,10 @@ def _client(api_key: str):
         raise HTTPException(503, "anthropic SDK is not installed") from exc
 
 
-def _safe_raise(exc: Exception) -> None:
-    try:
-        import anthropic
-    except ImportError:
-        raise HTTPException(503, "anthropic SDK is not installed") from exc
-
-    if isinstance(exc, anthropic.AuthenticationError):
-        raise HTTPException(401, "Provider authentication failed") from exc
-    if isinstance(exc, anthropic.RateLimitError):
-        raise HTTPException(429, "Provider rate limit reached") from exc
-    if isinstance(exc, anthropic.NotFoundError):
-        raise HTTPException(400, "Model not available from provider") from exc
-    if isinstance(exc, (anthropic.APIConnectionError, anthropic.APITimeoutError)):
-        raise HTTPException(503, "Provider temporarily unavailable") from exc
-    if isinstance(exc, anthropic.BadRequestError):
-        raise HTTPException(400, "Invalid request to provider") from exc
-    log.error("Unexpected Anthropic error: %s", type(exc).__name__)
-    raise HTTPException(502, "Provider returned an unexpected error") from exc
+def _safe_raise(exc: Exception, model: str | None = None) -> None:
+    if isinstance(exc, HTTPException):
+        raise exc
+    raise provider_error(exc, "anthropic", model) from exc
 
 
 def _build_anthropic_messages(messages: list[dict]) -> tuple[str | None, list[dict]]:
@@ -83,14 +70,14 @@ class AnthropicProvider(LLMProvider):
         # Anthropic has no public list-models endpoint; return curated list.
         return list(_CLAUDE_MODELS)
 
-    def generate(self, messages: list[dict], api_key: str | None, model_key: str) -> str:
+    def generate(self, messages: list[dict], api_key: str | None, model_key: str, max_output_tokens: int | None = None) -> str:
         if not api_key:
             raise HTTPException(401, "Provider authentication failed")
         system, msgs = _build_anthropic_messages(messages)
         if not msgs:
             msgs = [{"role": "user", "content": "Hello"}]
         try:
-            kwargs: dict = {"model": model_key, "max_tokens": 8096, "messages": msgs}
+            kwargs: dict = {"model": model_key, "max_tokens": max_output_tokens or 8096, "messages": msgs}
             if system:
                 kwargs["system"] = system
             resp = _client(api_key).messages.create(**kwargs)
@@ -98,17 +85,17 @@ class AnthropicProvider(LLMProvider):
         except HTTPException:
             raise
         except Exception as exc:
-            _safe_raise(exc)
+            _safe_raise(exc, model_key)
             return ""
 
-    def stream(self, messages: list[dict], api_key: str | None, model_key: str) -> Iterator[str]:
+    def stream(self, messages: list[dict], api_key: str | None, model_key: str, max_output_tokens: int | None = None) -> Iterator[str]:
         if not api_key:
             raise HTTPException(401, "Provider authentication failed")
         system, msgs = _build_anthropic_messages(messages)
         if not msgs:
             msgs = [{"role": "user", "content": "Hello"}]
         try:
-            kwargs: dict = {"model": model_key, "max_tokens": 8096, "messages": msgs}
+            kwargs: dict = {"model": model_key, "max_tokens": max_output_tokens or 8096, "messages": msgs}
             if system:
                 kwargs["system"] = system
             with _client(api_key).messages.stream(**kwargs) as stream:
@@ -117,4 +104,4 @@ class AnthropicProvider(LLMProvider):
         except HTTPException:
             raise
         except Exception as exc:
-            _safe_raise(exc)
+            _safe_raise(exc, model_key)

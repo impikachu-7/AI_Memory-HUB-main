@@ -4,6 +4,7 @@ from collections.abc import Iterator
 from fastapi import HTTPException
 
 from app.services.llm.base import LLMProvider
+from app.services.llm.errors import provider_error
 
 log = logging.getLogger(__name__)
 
@@ -17,19 +18,21 @@ def _configure(api_key: str):
         raise HTTPException(503, "google-generativeai SDK is not installed") from exc
 
 
-def _safe_raise(exc: Exception) -> None:
+def _safe_raise(exc: Exception, model: str | None = None) -> None:
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        raise provider_error(exc, "gemini", model, status) from exc
     name = type(exc).__name__
     msg = str(exc)
     if "API_KEY_INVALID" in msg or "PERMISSION_DENIED" in msg or "invalid" in msg.lower() and "key" in msg.lower():
-        raise HTTPException(401, "Provider authentication failed") from exc
+        raise provider_error(exc, "gemini", model, 401) from exc
     if "RESOURCE_EXHAUSTED" in msg or "quota" in msg.lower() or "rate" in msg.lower():
-        raise HTTPException(429, "Provider rate limit reached") from exc
+        raise provider_error(exc, "gemini", model, 429) from exc
     if "NOT_FOUND" in msg or "not found" in msg.lower():
-        raise HTTPException(400, "Model not available from provider") from exc
+        raise provider_error(exc, "gemini", model, 404) from exc
     if "UNAVAILABLE" in msg or "ServiceUnavailable" in name:
-        raise HTTPException(503, "Provider temporarily unavailable") from exc
-    log.error("Unexpected Gemini error: %s", name)
-    raise HTTPException(502, "Provider returned an unexpected error") from exc
+        raise provider_error(exc, "gemini", model, 503) from exc
+    raise provider_error(exc, "gemini", model) from exc
 
 
 class GeminiProvider(LLMProvider):
@@ -60,7 +63,7 @@ class GeminiProvider(LLMProvider):
             _safe_raise(exc)
             return []
 
-    def generate(self, messages: list[dict], api_key: str | None, model_key: str) -> str:
+    def generate(self, messages: list[dict], api_key: str | None, model_key: str, max_output_tokens: int | None = None) -> str:
         if not api_key:
             raise HTTPException(401, "Provider authentication failed")
         try:
@@ -69,15 +72,16 @@ class GeminiProvider(LLMProvider):
             contents = _to_gemini_contents(messages)
             system_instruction = _extract_system(messages)
             model = genai.GenerativeModel(model_key, system_instruction=system_instruction)
-            response = model.generate_content(contents)
+            kwargs = {"generation_config": {"max_output_tokens": max_output_tokens}} if max_output_tokens is not None else {}
+            response = model.generate_content(contents, **kwargs)
             return response.text or ""
         except HTTPException:
             raise
         except Exception as exc:
-            _safe_raise(exc)
+            _safe_raise(exc, model_key)
             return ""
 
-    def stream(self, messages: list[dict], api_key: str | None, model_key: str) -> Iterator[str]:
+    def stream(self, messages: list[dict], api_key: str | None, model_key: str, max_output_tokens: int | None = None) -> Iterator[str]:
         if not api_key:
             raise HTTPException(401, "Provider authentication failed")
         try:
@@ -85,13 +89,14 @@ class GeminiProvider(LLMProvider):
             contents = _to_gemini_contents(messages)
             system_instruction = _extract_system(messages)
             model = genai.GenerativeModel(model_key, system_instruction=system_instruction)
-            for chunk in model.generate_content(contents, stream=True):
+            kwargs = {"generation_config": {"max_output_tokens": max_output_tokens}} if max_output_tokens is not None else {}
+            for chunk in model.generate_content(contents, stream=True, **kwargs):
                 if chunk.text:
                     yield chunk.text
         except HTTPException:
             raise
         except Exception as exc:
-            _safe_raise(exc)
+            _safe_raise(exc, model_key)
 
 
 def _extract_system(messages: list[dict]) -> str | None:

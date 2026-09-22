@@ -271,7 +271,24 @@ export const api = {
                 const event = JSON.parse(line);
                 if (event.type === "chunk") onChunk(event.text);
                 else if (event.type === "done") onDone(event.message_id);
-                else if (event.type === "error") { const error = new Error(event.detail || "Error during generation"); (error as Error & { code?: string }).code = event.code; throw error; }
+                else if (event.type === "error") {
+                  const details: Record<string, string> = {
+                    PROVIDER_AUTH_ERROR: "Provider authentication failed.",
+                    PROVIDER_BILLING_OR_CREDITS: "Provider account or credits cannot currently serve this request.",
+                    PROVIDER_FORBIDDEN: "Provider access was denied for this request.",
+                    MODEL_NOT_FOUND: "Selected model is unavailable.",
+                    PROVIDER_TIMEOUT: "Provider request timed out.",
+                    PROVIDER_CONFLICT: "Provider could not accept this request in its current state.",
+                    RATE_LIMITED: "Provider rate limit reached.",
+                    PROVIDER_UNAVAILABLE: "Provider temporarily unavailable.",
+                    CONTEXT_LIMIT_EXCEEDED: "Context limit exceeded.",
+                    GENERATION_LIMIT_REACHED: "Generation limit reached.",
+                    PROVIDER_ERROR: "The provider could not complete this request.",
+                  };
+                  const error = new Error(event.detail || details[event.code] || "Error during generation");
+                  (error as Error & { code?: string }).code = event.code;
+                  throw error;
+                }
               } catch (error) {
                 onError(error instanceof Error ? error : new Error(String(error)));
                 return;

@@ -21,6 +21,7 @@ from app.services.oauth import exchange_google_code, google_authorization_url
 from app.services.memory_engine import extract_from_conversation, retrieve, vector_store
 from app.services.llm import get_provider
 from app.services.llm import context_builder
+from app.services.llm.errors import ProviderError, provider_error
 from app.services.data_export import export_conversations, export_memories, export_user_data
 
 log = logging.getLogger(__name__)
@@ -437,6 +438,34 @@ def generate(
     provider_name = body.provider
     model_key = body.model_key
     user_id = user.id
+    max_output_tokens = model_entry.max_output_tokens
+    estimated_context_characters = sum(len(str(message.get('content', ''))) for message in llm_messages)
+    log.info(
+        "LLM generation request provider=%s model=%s memory_enabled=%s messages=%s context_chars=%s",
+        provider_name,
+        model_key,
+        memory_enabled,
+        len(llm_messages),
+        estimated_context_characters,
+    )
+
+    safe_details = {
+        'PROVIDER_AUTH_ERROR': f'{provider_name.capitalize()} API key was rejected.',
+        'PROVIDER_BILLING_OR_CREDITS': f'{provider_name.capitalize()} account cannot currently serve this request. Check credits or provider access.',
+        'PROVIDER_FORBIDDEN': f'{provider_name.capitalize()} denied access to this request.',
+        'MODEL_NOT_FOUND': 'The selected model is unavailable from the provider.',
+        'PROVIDER_TIMEOUT': f'{provider_name.capitalize()} timed out while processing this request.',
+        'PROVIDER_CONFLICT': f'{provider_name.capitalize()} could not accept this request in its current state.',
+        'RATE_LIMITED': 'Provider rate limit reached.',
+        'PROVIDER_UNAVAILABLE': f'{provider_name.capitalize()} temporarily unavailable.',
+        'PROVIDER_ERROR': 'The provider could not complete this request.',
+    }
+
+    def normalized_provider_error(exc: Exception) -> ProviderError:
+        if isinstance(exc, ProviderError):
+            return exc
+        status_code = exc.status_code if isinstance(exc, HTTPException) else None
+        return provider_error(exc, provider_name, model_key, status_code)
 
     def event_stream():
         accumulated = []
@@ -447,30 +476,33 @@ def generate(
                 return
             # Decrypt immediately before use; result is local to this generator
             api_key = decrypt_api_key(encrypted_key) if encrypted_key else None
-            for chunk in provider.stream(llm_messages, api_key, model_key):
+            for chunk in provider.stream(llm_messages, api_key, model_key, max_output_tokens):
                 accumulated.append(chunk)
                 yield json.dumps({'type': 'chunk', 'text': chunk}) + '\n'
         except HTTPException as exc:
-            safe_details = {
-                401: f'{provider_name} credentials were rejected.',
-                429: f'{provider_name} is rate limited.',
-                503: f'{provider_name} is temporarily unavailable.',
-            }
-            detail = safe_details.get(exc.status_code, 'The selected model could not complete this request.')
+            normalized = normalized_provider_error(exc)
+            log.error(
+                "%s generation failed provider=%s model=%s status=%s error_type=%s",
+                provider_name.capitalize(),
+                provider_name,
+                model_key,
+                normalized.provider_status,
+                normalized.error_type,
+            )
             record_event(db, user_id, 'message_failed', provider_name, model_key, model_entry.is_local)
             db.commit()
             yield json.dumps({
                 'type': 'error',
-                'code': {401: 'PROVIDER_AUTH_ERROR', 429: 'RATE_LIMITED', 503: 'NETWORK_ERROR'}.get(exc.status_code, 'INTERNAL_ERROR'),
-                'detail': detail,
+                'code': normalized.code,
+                'detail': safe_details.get(normalized.code, safe_details['PROVIDER_ERROR']),
                 'provider': provider_name,
                 'model_key': model_key,
                 'recoverable': True,
                 'partial': bool(accumulated),
             }) + '\n'
             return
-        except Exception:
-            log.exception("Unexpected error during streaming for provider=%s", provider_name)
+        except Exception as exc:
+            log.exception("Unexpected error during streaming for provider=%s model=%s", provider_name, model_key)
             yield json.dumps({
                 'type': 'error',
                 'code': 'INTERNAL_ERROR',

@@ -2,16 +2,14 @@
 
 All concrete providers must implement validate_credentials, list_models,
 generate, and stream.  Error contract:
-  - Invalid/expired key  → HTTPException(401, "Provider authentication failed")
-  - Rate limit           → HTTPException(429, "Provider rate limit reached")
-  - Model not found      → HTTPException(400, "Model not available from provider")
-  - Unreachable/timeout  → HTTPException(503, "Provider temporarily unavailable")
-  - Any other error      → HTTPException(502, "Provider returned an unexpected error")
+    - Provider failures are normalized to ProviderError with a stable code.
 
 SECURITY: exception messages must NEVER contain the API key string.
 """
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
+
+from app.services.llm.errors import ProviderError
 
 
 class LLMProvider(ABC):
@@ -29,12 +27,24 @@ class LLMProvider(ABC):
         """
 
     @abstractmethod
-    def generate(self, messages: list[dict], api_key: str | None, model_key: str) -> str:
+    def generate(
+        self,
+        messages: list[dict],
+        api_key: str | None,
+        model_key: str,
+        max_output_tokens: int | None = None,
+    ) -> str:
         """Non-streaming generation.  Return the complete response string."""
 
     @abstractmethod
-    def stream(self, messages: list[dict], api_key: str | None, model_key: str) -> Iterator[str]:
+    def stream(
+        self,
+        messages: list[dict],
+        api_key: str | None,
+        model_key: str,
+        max_output_tokens: int | None = None,
+    ) -> Iterator[str]:
         """Streaming generation.  Yield text chunks as they arrive.
 
-        Raise an appropriate HTTPException on provider error.
+        Raise ProviderError on provider error.
         """

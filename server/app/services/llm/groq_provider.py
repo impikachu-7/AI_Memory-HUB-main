@@ -4,6 +4,7 @@ from collections.abc import Iterator
 from fastapi import HTTPException
 
 from app.services.llm.base import LLMProvider
+from app.services.llm.errors import provider_error
 
 log = logging.getLogger(__name__)
 
@@ -18,24 +19,10 @@ def _client(api_key: str):
         raise HTTPException(503, "openai SDK is not installed") from exc
 
 
-def _safe_raise(exc: Exception) -> None:
-    try:
-        import openai
-    except ImportError:
-        raise HTTPException(503, "openai SDK is not installed") from exc
-
-    if isinstance(exc, openai.AuthenticationError):
-        raise HTTPException(401, "Provider authentication failed") from exc
-    if isinstance(exc, openai.RateLimitError):
-        raise HTTPException(429, "Provider rate limit reached") from exc
-    if isinstance(exc, openai.NotFoundError):
-        raise HTTPException(400, "Model not available from provider") from exc
-    if isinstance(exc, (openai.APIConnectionError, openai.APITimeoutError)):
-        raise HTTPException(503, "Provider temporarily unavailable") from exc
-    if isinstance(exc, openai.BadRequestError):
-        raise HTTPException(400, "Invalid request to provider") from exc
-    log.error("Unexpected Groq error: %s", type(exc).__name__)
-    raise HTTPException(502, "Provider returned an unexpected error") from exc
+def _safe_raise(exc: Exception, model: str | None = None) -> None:
+    if isinstance(exc, HTTPException):
+        raise exc
+    raise provider_error(exc, "groq", model) from exc
 
 
 class GroqProvider(LLMProvider):
@@ -64,27 +51,29 @@ class GroqProvider(LLMProvider):
             _safe_raise(exc)
             return []
 
-    def generate(self, messages: list[dict], api_key: str | None, model_key: str) -> str:
+    def generate(self, messages: list[dict], api_key: str | None, model_key: str, max_output_tokens: int | None = None) -> str:
         if not api_key:
             raise HTTPException(401, "Provider authentication failed")
         try:
-            resp = _client(api_key).chat.completions.create(
-                model=model_key, messages=messages
-            )
+            kwargs = {"model": model_key, "messages": messages}
+            if max_output_tokens is not None:
+                kwargs["max_tokens"] = max_output_tokens
+            resp = _client(api_key).chat.completions.create(**kwargs)
             return resp.choices[0].message.content or ""
         except HTTPException:
             raise
         except Exception as exc:
-            _safe_raise(exc)
+            _safe_raise(exc, model_key)
             return ""
 
-    def stream(self, messages: list[dict], api_key: str | None, model_key: str) -> Iterator[str]:
+    def stream(self, messages: list[dict], api_key: str | None, model_key: str, max_output_tokens: int | None = None) -> Iterator[str]:
         if not api_key:
             raise HTTPException(401, "Provider authentication failed")
         try:
-            with _client(api_key).chat.completions.create(
-                model=model_key, messages=messages, stream=True
-            ) as stream:
+            kwargs = {"model": model_key, "messages": messages, "stream": True}
+            if max_output_tokens is not None:
+                kwargs["max_tokens"] = max_output_tokens
+            with _client(api_key).chat.completions.create(**kwargs) as stream:
                 for chunk in stream:
                     delta = chunk.choices[0].delta.content if chunk.choices else None
                     if delta:
@@ -92,4 +81,4 @@ class GroqProvider(LLMProvider):
         except HTTPException:
             raise
         except Exception as exc:
-            _safe_raise(exc)
+            _safe_raise(exc, model_key)

@@ -75,11 +75,12 @@ class OllamaProvider(LLMProvider):
         except Exception as exc:
             raise HTTPException(503, "Ollama is not available") from exc
 
-    def generate(self, messages: list[dict], api_key: str | None, model_key: str) -> str:
+    def generate(self, messages: list[dict], api_key: str | None, model_key: str, max_output_tokens: int | None = None) -> str:
         try:
-            resp = _openai_client().chat.completions.create(
-                model=model_key, messages=messages
-            )
+            kwargs = {"model": model_key, "messages": messages}
+            if max_output_tokens is not None:
+                kwargs["max_tokens"] = max_output_tokens
+            resp = _openai_client().chat.completions.create(**kwargs)
             return resp.choices[0].message.content or ""
         except HTTPException:
             raise
@@ -87,11 +88,12 @@ class OllamaProvider(LLMProvider):
             _safe_raise(exc)
             return ""
 
-    def stream(self, messages: list[dict], api_key: str | None, model_key: str) -> Iterator[str]:
+    def stream(self, messages: list[dict], api_key: str | None, model_key: str, max_output_tokens: int | None = None) -> Iterator[str]:
         try:
-            with _openai_client().chat.completions.create(
-                model=model_key, messages=messages, stream=True
-            ) as stream:
+            kwargs = {"model": model_key, "messages": messages, "stream": True}
+            if max_output_tokens is not None:
+                kwargs["max_tokens"] = max_output_tokens
+            with _openai_client().chat.completions.create(**kwargs) as stream:
                 for chunk in stream:
                     delta = chunk.choices[0].delta.content if chunk.choices else None
                     if delta:

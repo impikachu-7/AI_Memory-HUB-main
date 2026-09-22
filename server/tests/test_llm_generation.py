@@ -35,6 +35,7 @@ from app.models import Message, ModelRegistry, ProviderConfiguration
 from app.services.credentials import decrypt_api_key, encrypt_api_key
 from app.services.email import email_service
 from app.services.llm.registry import get_provider
+from app.services.llm.errors import provider_error
 from app.services.memory_engine import vector_store
 
 # ---------------------------------------------------------------------------
@@ -603,6 +604,47 @@ def test_generate_rate_limit_returns_safe_error():
     events = [json.loads(line) for line in r.text.strip().split('\n') if line]
     assert any(e['type'] == 'error' for e in events)
     assert any('rate limit' in e.get('detail', '').lower() for e in events if e['type'] == 'error')
+
+
+def test_provider_statuses_have_stable_safe_codes():
+    expected = {
+        400: 'PROVIDER_ERROR', 401: 'PROVIDER_AUTH_ERROR',
+        402: 'PROVIDER_BILLING_OR_CREDITS', 403: 'PROVIDER_FORBIDDEN',
+        404: 'MODEL_NOT_FOUND', 408: 'PROVIDER_TIMEOUT',
+        409: 'PROVIDER_CONFLICT', 429: 'RATE_LIMITED', 500: 'PROVIDER_UNAVAILABLE',
+    }
+    for status, code in expected.items():
+        error = provider_error(RuntimeError('provider body must stay private'), 'openrouter', 'openai/gpt-4o', status)
+        assert error.code == code
+        assert 'provider body' not in str(error.detail)
+
+
+def test_generate_maps_provider_400_to_provider_error_not_internal_error():
+    from fastapi import HTTPException as FHE
+    token = signup('gen-provider-400@example.com')
+    conv_id = make_conversation(token)
+    seed_model()
+    configure_provider(token)
+
+    def bad_request_stream(*_args, **_kwargs):
+        raise FHE(400, 'raw provider response must stay private')
+        yield
+
+    mock_provider = MagicMock()
+    mock_provider.stream.side_effect = bad_request_stream
+    with patch('app.api.routes.get_provider', return_value=mock_provider):
+        response = client.post(
+            f'/api/v1/conversations/{conv_id}/generate',
+            headers=headers(token),
+            json={'message': 'hello', 'provider': 'openai', 'model_key': 'gpt-4o'},
+        )
+
+    events = [json.loads(line) for line in response.text.strip().split('\n') if line]
+    error = events[-1]
+    assert error['type'] == 'error'
+    assert error['code'] == 'PROVIDER_ERROR'
+    assert error['detail'] != 'The selected model could not complete this request.'
+    assert 'raw provider response' not in response.text
 
 
 # ---------------------------------------------------------------------------

@@ -71,7 +71,7 @@ class KieProvider(LLMProvider):
         _key()
         return _MODELS
 
-    def generate(self, messages: list[dict], api_key: str | None, model_key: str) -> str:
+    def generate(self, messages: list[dict], api_key: str | None, model_key: str, max_output_tokens: int | None = None) -> str:
         if model_key not in {model["model_key"] for model in _MODELS}:
             raise HTTPException(400, "Model not available from provider")
         try:
@@ -101,5 +101,5 @@ class KieProvider(LLMProvider):
             raise HTTPException(502, "Provider returned an empty response")
         return text
 
-    def stream(self, messages: list[dict], api_key: str | None, model_key: str) -> Iterator[str]:
-        yield self.generate(messages, api_key, model_key)
+    def stream(self, messages: list[dict], api_key: str | None, model_key: str, max_output_tokens: int | None = None) -> Iterator[str]:
+        yield self.generate(messages, api_key, model_key, max_output_tokens)
