@@ -479,18 +479,34 @@ function ModelSelectorPage() {
   const [activeConvId, setActiveConvId] = useState<string | null>(null);
 
   useEffect(() => {
-    Promise.all([api.models.listRegistry(), api.conversations.list()])
-      .then(([mods, convs]) => {
-        setAvailableModels(mods);
+    const loadModels = async () => {
+      try {
+        const [mods, convs] = await Promise.all([api.models.listRegistry(), api.conversations.list()]);
+        let mergedModels = mods.filter((model) => !(model.provider === "ollama" && model.model_key === "ollama/local"));
+        try {
+          const local = await api.localConnector.models();
+          if (local.models.length) {
+            const registered = await api.providers.registerLocalModels(
+              local.models.map((model) => ({ model_key: model.name, display_name: model.name }))
+            );
+            const nonDuplicateLocal = registered.filter(
+              (model) => !mergedModels.some((existing) => existing.id === model.id)
+            );
+            mergedModels = [...mergedModels, ...nonDuplicateLocal];
+          }
+        } catch (error) {
+          console.warn("Local Ollama models are unavailable:", error);
+        }
+        setAvailableModels(mergedModels);
         setConversationsList(convs);
         setActiveConvId(convs[0]?.id ?? null);
-        if (mods.length > 0) {
-          setSelectedModel(mods[0]);
-        }
-      })
-      .catch(() => {
+        if (mergedModels.length > 0) setSelectedModel(mergedModels[0]);
+      } catch (error) {
+        console.error("Failed to load available models:", error);
         toast.error("Failed to load available models");
-      });
+      }
+    };
+    void loadModels();
   }, []);
 
 const handleSelectModel = async (model: ModelRead) => {
