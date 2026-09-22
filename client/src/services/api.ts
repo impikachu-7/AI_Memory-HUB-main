@@ -16,7 +16,7 @@ import type {
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "/api/v1";
 const TOKEN_STORAGE_KEY = "ai-memory-hub.access-token";
-const LOCAL_CONNECTOR_URL = import.meta.env.VITE_LOCAL_CONNECTOR_URL ?? "http://localhost:8765";
+const LOCAL_CONNECTOR_URL = import.meta.env.VITE_LOCAL_CONNECTOR_URL ?? "http://127.0.0.1:8765";
 
 let accessToken = sessionStorage.getItem(TOKEN_STORAGE_KEY);
 
@@ -42,7 +42,7 @@ async function localFetch(input: string, init: RequestInit = {}) {
   // Declaring the target address space lets the browser apply the intended local-network policy.
   return fetch(input, {
     ...init,
-    ...({ targetAddressSpace: "loopback" } as RequestInit & { targetAddressSpace: "loopback" }),
+    ...({ targetAddressSpace: "local" } as RequestInit & { targetAddressSpace: "loopback" }),
   });
 }
 
