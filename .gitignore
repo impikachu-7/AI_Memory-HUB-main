@@ -121,3 +121,6 @@ __pycache__/
 
 # Local application data
 server/data/
+# Python virtual environments
+**/.venv/
+server/.venv/
