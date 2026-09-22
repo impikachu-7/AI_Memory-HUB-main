@@ -353,5 +353,46 @@ export const api = {
     health: () => localRequest<{ status: string; detail?: string }>("/health"),
     status: () => localRequest<{ connected: boolean; status: string }>("/status"),
     models: () => localRequest<{ models: Array<{ name: string; size?: number; modified_at?: string }> }>("/models"),
+    chat: async (
+      model: string,
+      messages: Array<{ role: string; content: string }>,
+      onChunk: (text: string) => void,
+      signal?: AbortSignal,
+    ) => {
+      const response = await fetch(`${LOCAL_CONNECTOR_URL}/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model, messages, stream: true }),
+        signal,
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.detail || `Local Ollama request failed (${response.status})`);
+      }
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error("Local Ollama response body is not readable.");
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const event = JSON.parse(line);
+          const text = event?.message?.content;
+          if (typeof text === "string" && text) onChunk(text);
+          if (event?.error) throw new Error(String(event.error));
+        }
+      }
+      if (buffer.trim()) {
+        const event = JSON.parse(buffer);
+        const text = event?.message?.content;
+        if (typeof text === "string" && text) onChunk(text);
+        if (event?.error) throw new Error(String(event.error));
+      }
+    },
   },
 };
