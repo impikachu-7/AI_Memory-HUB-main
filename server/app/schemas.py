@@ -125,4 +125,16 @@ class ProviderModelRead(BaseModel):
     context_length: int | None = None
     is_local: bool = False
 
+class LocalModelRegisterRequest(BaseModel):
+    model_key: str = Field(min_length=1, max_length=150)
+    display_name: str | None = Field(default=None, max_length=150)
+
+class LocalGenerationPrepareRequest(BaseModel):
+    message: str = Field(min_length=1)
+    model_key: str = Field(min_length=1, max_length=150)
+
+class LocalGenerationCompleteRequest(BaseModel):
+    user_message_id: str = Field(min_length=1, max_length=36)
+    content: str = Field(min_length=1, max_length=200000)
+
 
