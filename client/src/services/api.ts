@@ -226,6 +226,18 @@ export const api = {
     remove: (conversationId: string) => request<void>(`/conversations/${conversationId}`, { method: "DELETE" }),
     listMessages: (conversationId: string) => request<Message[]>(`/conversations/${conversationId}/messages`),
     export: () => request<Blob>("/privacy/export/conversations", {}, "blob"),
+    registerLocalModels: (models: Array<{ model_key: string; display_name?: string }>) =>
+      request<ModelRead[]>("/providers/ollama/local-models", { method: "POST", body: JSON.stringify(models) }),
+    prepareLocalGeneration: (conversationId: string, message: string, modelKey: string) =>
+      request<{ message_id: string; model_key: string; messages: Array<{ role: string; content: string }> }>(
+        `/conversations/${conversationId}/prepare-local-generation`,
+        { method: "POST", body: JSON.stringify({ message, model_key: modelKey }) }
+      ),
+    completeLocalGeneration: (conversationId: string, userMessageId: string, content: string) =>
+      request<{ message_id: string }>(
+        `/conversations/${conversationId}/complete-local-generation`,
+        { method: "POST", body: JSON.stringify({ user_message_id: userMessageId, content }) }
+      ),
     generate: (
       conversationId: string,
       req: GenerateRequest,
