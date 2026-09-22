@@ -1,0 +1,128 @@
+from datetime import datetime
+from typing import Literal
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, HttpUrl
+
+
+class ORM(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+
+class RegisterRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=12, max_length=128)
+    full_name: str | None = Field(default=None, max_length=200)
+
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: "UserRead | None" = None
+
+
+class UserRead(ORM):
+    id: str
+    email: EmailStr
+    full_name: str | None
+    is_email_verified: bool
+
+class ProfileUpdate(BaseModel):
+    full_name: str | None = Field(default=None, max_length=200)
+
+
+class OtpRequest(BaseModel): email: EmailStr
+class OtpVerifyRequest(OtpRequest): otp: str = Field(pattern=r"^\d{6}$")
+class PasswordResetRequest(BaseModel): reset_token: str; new_password: str = Field(min_length=12, max_length=128)
+class GoogleCallbackRequest(BaseModel): code: str; state: str
+
+
+class ConversationCreate(BaseModel): title: str = Field(default="New conversation", max_length=300)
+class ConversationUpdate(BaseModel):
+    title: str | None = Field(default=None, max_length=300)
+    selected_model_id: str | None = None
+    is_archived: bool | None = None
+class ConversationRead(ORM): id: str; title: str; selected_model_id: str | None; is_archived: bool; created_at: datetime
+class MessageCreate(BaseModel): role: str = Field(pattern="^(user|assistant|system)$"); content: str = Field(min_length=1); provider: str | None = None; model_id: str | None = None
+class MessageRead(ORM): id: str; conversation_id: str; role: str; content: str; provider: str | None; model_id: str | None; created_at: datetime
+MemoryCategory = Literal['Personal', 'Education', 'Career', 'Preferences', 'Projects', 'Goals', 'Skills', 'Other']
+class MemoryCreate(BaseModel):
+    content: str = Field(min_length=1); category: MemoryCategory = 'Other'; source_conversation_id: str | None = None
+    importance: float = Field(default=0.5, ge=0, le=1); confidence: float = Field(default=0.7, ge=0, le=1)
+class MemoryUpdate(BaseModel):
+    content: str | None = Field(default=None, min_length=1); category: MemoryCategory | None = None; importance: float | None = Field(default=None, ge=0, le=1)
+    confidence: float | None = Field(default=None, ge=0, le=1); is_archived: bool | None = None; is_pinned: bool | None = None
+class MemoryRead(ORM): id: str; content: str; category: str; source_conversation_id: str | None; importance: float; confidence: float; is_archived: bool; is_pinned: bool; created_at: datetime
+class MemorySearch(BaseModel): query: str = Field(min_length=1); limit: int = Field(default=8, ge=1, le=20)
+class MemorySearchResult(MemoryRead): score: float
+class ProviderCreate(BaseModel): provider: str = Field(pattern="^(openai|gemini|anthropic|deepseek|groq|openrouter|ollama|kie)$"); api_key: str | None = Field(default=None, min_length=8); is_enabled: bool = False
+class ProviderRead(ORM): id: str; provider: str; is_enabled: bool; created_at: datetime
+class ModelRead(ORM):
+    id: str
+    provider: str
+    model_key: str
+    display_name: str
+    is_local: bool
+    is_active: bool
+    context_window: int | None = None
+    max_output_tokens: int | None = None
+    supports_streaming: bool | None = None
+    supports_temperature: bool | None = None
+class AnalyticsRead(BaseModel): conversations: int; messages: int; memories: int
+class AnalyticsOverview(BaseModel):
+    total_conversations: int
+    total_messages: int
+    total_memories: int
+    total_ai_requests: int
+    successful_requests: int
+    failed_requests: int
+
+class AnalyticsPoint(BaseModel):
+    date: str
+    conversations: int = 0
+    messages: int = 0
+    memories: int = 0
+    successful_requests: int = 0
+    failed_requests: int = 0
+
+class AnalyticsItem(BaseModel):
+    name: str
+    count: int
+    provider: str | None = None
+    is_local: bool | None = None
+
+class SettingsRead(ORM):
+    memory_enabled: bool
+    memory_retrieval_mode: Literal['automatic', 'off']
+    notifications_enabled: bool
+
+class SettingsUpdate(BaseModel):
+    memory_enabled: bool | None = None
+    memory_retrieval_mode: Literal['automatic', 'off'] | None = None
+    notifications_enabled: bool | None = None
+
+# Phase 5 — generation schemas
+class GenerateRequest(BaseModel):
+    message: str = Field(min_length=1)
+    provider: str = Field(pattern="^(openai|gemini|anthropic|deepseek|groq|openrouter|ollama|kie)$")
+    model_key: str = Field(min_length=1)
+    image_url: HttpUrl | None = None
+
+class ProviderUpdate(BaseModel):
+    api_key: str | None = Field(default=None, min_length=8)
+    is_enabled: bool | None = None
+
+class ProviderCredentialCreate(BaseModel):
+    api_key: str | None = Field(default=None, min_length=8)
+    is_enabled: bool = True
+
+class ProviderModelRead(BaseModel):
+    model_key: str
+    display_name: str
+    context_length: int | None = None
+    is_local: bool = False
+
+
