@@ -217,6 +217,8 @@ export const api = {
     removeCredentials: (provider: string) => request<void>(`/providers/${provider}/credentials`, { method: "DELETE" }),
     test: (provider: string) => request<{ provider: string; status: string }>(`/providers/${provider}/test`, { method: "POST" }),
     listModels: (provider: string) => request<ProviderModelRead[]>(`/providers/${provider}/models`),
+    registerLocalModels: (models: Array<{ model_key: string; display_name?: string }>) =>
+      request<ModelRead[]>("/providers/ollama/local-models", { method: "POST", body: JSON.stringify(models) }),
   },
   conversations: {
     list: async () => (await request<ConversationResponse[]>("/conversations")).map(toConversationSummary),
@@ -226,8 +228,6 @@ export const api = {
     remove: (conversationId: string) => request<void>(`/conversations/${conversationId}`, { method: "DELETE" }),
     listMessages: (conversationId: string) => request<Message[]>(`/conversations/${conversationId}/messages`),
     export: () => request<Blob>("/privacy/export/conversations", {}, "blob"),
-    registerLocalModels: (models: Array<{ model_key: string; display_name?: string }>) =>
-      request<ModelRead[]>("/providers/ollama/local-models", { method: "POST", body: JSON.stringify(models) }),
     prepareLocalGeneration: (conversationId: string, message: string, modelKey: string) =>
       request<{ message_id: string; model_key: string; messages: Array<{ role: string; content: string }> }>(
         `/conversations/${conversationId}/prepare-local-generation`,
