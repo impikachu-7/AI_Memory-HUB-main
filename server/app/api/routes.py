@@ -407,6 +407,32 @@ def generate(
             ModelRegistry.is_active.is_(True),
         )
     )
+
+    # Live-provider models may not exist in the static registry. For configured
+    # cloud providers, allow an exact model returned by the provider's own
+    # discovery endpoint and materialize it into ModelRegistry for future use.
+    if model_entry is None and body.provider not in {'ollama', 'kie'}:
+        provider = get_provider(body.provider)
+        discovery_key = decrypt_api_key(config.encrypted_api_key) if config.encrypted_api_key else None
+        try:
+            discovered = provider.list_models(discovery_key)
+        except HTTPException:
+            raise
+        if not any(str(item.get('model_key')) == body.model_key for item in discovered):
+            raise HTTPException(400, 'Model not available from provider')
+        model_entry = ModelRegistry(
+            provider=body.provider,
+            model_key=body.model_key,
+            display_name=next(
+                (str(item.get('display_name') or body.model_key) for item in discovered if str(item.get('model_key')) == body.model_key),
+                body.model_key,
+            ),
+            is_local=False,
+            is_active=True,
+        )
+        db.add(model_entry)
+        db.flush()
+
     if model_entry is None:
         raise HTTPException(400, 'Model not available')
 
