@@ -191,17 +191,16 @@ function ChatPage() {
           userPrompt,
           selectedModel.model_key,
         );
+        let localResponse = "";
         await api.localConnector.chat(
           selectedModel.model_key,
           prepared.messages,
-          (chunk) => setDraftResponse((prev) => prev + chunk),
+          (chunk) => {
+            localResponse += chunk;
+            setDraftResponse(localResponse);
+          },
         );
-        const finalText = await new Promise<string>((resolve) => {
-          setDraftResponse((current) => {
-            resolve(current);
-            return current;
-          });
-        });
+        const finalText = localResponse;
         if (!finalText.trim()) throw new Error("Ollama returned an empty response.");
         await api.conversations.completeLocalGeneration(activeConvId, prepared.message_id, finalText);
         setIsGenerating(false);
