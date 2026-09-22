@@ -30,8 +30,15 @@ app.add_middleware(
     allow_origins=list(ALLOWED_ORIGINS),
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization"],
+    allow_headers=["Content-Type", "Authorization", "Access-Control-Request-Private-Network"],
 )
+
+@app.middleware("http")
+async def add_local_network_permission_header(request, call_next):
+    response = await call_next(request)
+    if request.headers.get("access-control-request-private-network") == "true":
+        response.headers["Access-Control-Allow-Private-Network"] = "true"
+    return response
 
 
 async def ollama_get(path: str):
