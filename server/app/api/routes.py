@@ -400,6 +400,8 @@ def generate(
         raise HTTPException(400, 'Provider not enabled')
 
     # 3. Model must exist in registry for this provider
+    # Ollama models are discovered locally and are intentionally not routed
+    # through the Render backend. Local generation uses the browser connector.
     model_entry = db.scalar(
         select(ModelRegistry).where(
             ModelRegistry.provider == body.provider,
