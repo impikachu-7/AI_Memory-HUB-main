@@ -202,10 +202,23 @@ function ChatPage() {
         );
         const finalText = localResponse;
         if (!finalText.trim()) throw new Error("Ollama returned an empty response.");
-        await api.conversations.completeLocalGeneration(activeConvId, prepared.message_id, finalText);
+        const completed = await api.conversations.completeLocalGeneration(
+          activeConvId,
+          prepared.message_id,
+          finalText,
+        );
+        const assistantMessage: Message = {
+          id: completed.message_id,
+          conversation_id: activeConvId,
+          role: "assistant",
+          content: finalText,
+          provider: "ollama",
+          model_id: selectedModel.model_key,
+          created_at: new Date().toISOString(),
+        };
+        setMessagesList((prev) => [...prev, assistantMessage]);
         setIsGenerating(false);
         setDraftResponse("");
-        setMessagesList(await api.conversations.listMessages(activeConvId));
       } catch (error) {
         setIsGenerating(false);
         setErrorMsg(error instanceof Error ? error.message : "Ollama generation failed.");
