@@ -727,6 +727,70 @@ def list_models(db: Session = Depends(get_db), user: User = Depends(current_user
         )
     )
 
+@router.post('/providers/ollama/local-models', response_model=list[ModelRead])
+def register_local_ollama_models(body: list[LocalModelRegisterRequest], db: Session = Depends(get_db), user: User = Depends(current_user)):
+    config = db.scalar(select(ProviderConfiguration).where(ProviderConfiguration.user_id == user.id, ProviderConfiguration.provider == 'ollama'))
+    if config is None:
+        raise HTTPException(400, 'Ollama is not configured')
+    if not config.is_enabled:
+        raise HTTPException(400, 'Ollama is not enabled')
+    result = []
+    for item in body:
+        existing = db.scalar(select(ModelRegistry).where(ModelRegistry.model_key == item.model_key))
+        if existing is None:
+            existing = ModelRegistry(provider='ollama', model_key=item.model_key, display_name=item.display_name or item.model_key, is_local=True, is_active=True, supports_streaming=True)
+            db.add(existing)
+        elif existing.provider != 'ollama':
+            raise HTTPException(409, 'Model key belongs to another provider')
+        else:
+            existing.display_name = item.display_name or existing.display_name or item.model_key
+            existing.is_local = True
+            existing.is_active = True
+        result.append(existing)
+    db.commit()
+    for item in result: db.refresh(item)
+    return result
+
+@router.post('/conversations/{conversation_id}/prepare-local-generation')
+def prepare_local_generation(conversation_id: str, body: LocalGenerationPrepareRequest, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    conversations.get(db, user.id, conversation_id)
+    config = db.scalar(select(ProviderConfiguration).where(ProviderConfiguration.user_id == user.id, ProviderConfiguration.provider == 'ollama'))
+    if config is None:
+        raise HTTPException(400, 'Ollama is not configured')
+    if not config.is_enabled:
+        raise HTTPException(400, 'Ollama is not enabled')
+    model_entry = db.scalar(select(ModelRegistry).where(ModelRegistry.provider == 'ollama', ModelRegistry.model_key == body.model_key, ModelRegistry.is_active.is_(True)))
+    if model_entry is None:
+        raise HTTPException(400, 'Local Ollama model is not registered')
+    user_settings = db.scalar(select(UserSettings).where(UserSettings.user_id == user.id))
+    memory_enabled = user_settings is None or user_settings.memory_enabled
+    llm_messages = context_builder.build(db, user.id, conversation_id, body.message, memory_enabled=memory_enabled)
+    user_msg = messages.create(db, Message(user_id=user.id, conversation_id=conversation_id, role='user', content=body.message, provider='ollama', model_id=body.model_key))
+    record_event(db, user.id, 'message_sent', 'ollama', body.model_key, True)
+    db.commit()
+    db.refresh(user_msg)
+    return {'message_id': user_msg.id, 'model_key': body.model_key, 'messages': llm_messages}
+
+@router.post('/conversations/{conversation_id}/complete-local-generation')
+def complete_local_generation(conversation_id: str, body: LocalGenerationCompleteRequest, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    conversations.get(db, user.id, conversation_id)
+    user_msg = db.scalar(select(Message).where(Message.id == body.user_message_id, Message.user_id == user.id, Message.conversation_id == conversation_id, Message.role == 'user'))
+    if user_msg is None:
+        raise HTTPException(404, 'Local generation message not found')
+    existing = db.scalar(select(Message).where(Message.conversation_id == conversation_id, Message.user_id == user.id, Message.role == 'assistant', Message.model_id == user_msg.model_id, Message.content == body.content))
+    if existing is not None:
+        return {'message_id': existing.id}
+    assistant = Message(user_id=user.id, conversation_id=conversation_id, role='assistant', content=body.content, provider='ollama', model_id=user_msg.model_id)
+    db.add(assistant)
+    record_event(db, user.id, 'message_completed', 'ollama', user_msg.model_id, True)
+    db.commit()
+    db.refresh(assistant)
+    try:
+        extract_from_conversation(db, user.id, conversation_id)
+    except Exception:
+        log.exception('Local Ollama memory extraction failed')
+    return {'message_id': assistant.id}
+
 @router.get('/analytics', response_model=AnalyticsRead)
 def analytics(db: Session = Depends(get_db), user: User = Depends(current_user)):
     count = lambda model: db.scalar(select(func.count()).select_from(model).where(model.user_id == user.id)) or 0
