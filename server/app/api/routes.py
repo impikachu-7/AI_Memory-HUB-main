@@ -350,7 +350,14 @@ def delete_conversation(conversation_id: str, db: Session = Depends(get_db), use
 
 @router.get('/conversations/{conversation_id}/messages', response_model=list[MessageRead])
 def list_messages(conversation_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
-    conversations.get(db, user.id, conversation_id); return list(db.scalars(select(Message).where(Message.user_id == user.id, Message.conversation_id == conversation_id)))
+    conversations.get(db, user.id, conversation_id)
+    return list(
+        db.scalars(
+            select(Message)
+            .where(Message.user_id == user.id, Message.conversation_id == conversation_id)
+            .order_by(Message.created_at.asc())
+        )
+    )
 @router.post('/conversations/{conversation_id}/messages', response_model=MessageRead, status_code=201)
 def create_message(conversation_id: str, body: MessageCreate, db: Session = Depends(get_db), user: User = Depends(current_user)):
     conversations.get(db, user.id, conversation_id); return messages.create(db, Message(user_id=user.id, conversation_id=conversation_id, **body.model_dump()))
