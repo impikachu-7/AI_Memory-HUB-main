@@ -27,11 +27,12 @@ def upgrade():
     )
 
     conn = op.get_bind()
-    users = conn.execute(sa.text("SELECT id FROM users"))
-    conn.execute(
-        sa.text("INSERT INTO user_settings (id, user_id, memory_enabled, memory_retrieval_mode, notifications_enabled) VALUES (:id, :user_id, true, 'automatic', true)"),
-        [{"id": str(uuid.uuid4()), "user_id": row[0]} for row in users],
-    )
+    users = [row[0] for row in conn.execute(sa.text("SELECT id FROM users"))]
+    if users:
+        conn.execute(
+            sa.text("INSERT INTO user_settings (id, user_id, memory_enabled, memory_retrieval_mode, notifications_enabled) VALUES (:id, :user_id, true, 'automatic', true)"),
+            [{"id": str(uuid.uuid4()), "user_id": user_id} for user_id in users],
+        )
 
 
 def downgrade():
