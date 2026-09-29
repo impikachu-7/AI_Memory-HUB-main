@@ -4,6 +4,7 @@ import hmac
 import json
 import logging
 import secrets
+import uuid
 from urllib.parse import urlencode
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Query, Response, status
 from fastapi.responses import StreamingResponse
@@ -303,7 +304,7 @@ def update_me(body: ProfileUpdate, db: Session = Depends(get_db), user: User = D
 def get_user_settings(db: Session = Depends(get_db), user: User = Depends(current_user)):
     settings = db.scalar(select(UserSettings).where(UserSettings.user_id == user.id))
     if settings is None:
-        settings = UserSettings(user_id=user.id)
+        settings = UserSettings(id=str(uuid.uuid4()), user_id=user.id)
         db.add(settings); db.commit(); db.refresh(settings)
     return settings
 
@@ -311,7 +312,7 @@ def get_user_settings(db: Session = Depends(get_db), user: User = Depends(curren
 def update_user_settings(body: SettingsUpdate, db: Session = Depends(get_db), user: User = Depends(current_user)):
     settings = db.scalar(select(UserSettings).where(UserSettings.user_id == user.id))
     if settings is None:
-        settings = UserSettings(user_id=user.id)
+        settings = UserSettings(id=str(uuid.uuid4()), user_id=user.id)
         db.add(settings)
     for field, value in body.model_dump(exclude_unset=True).items():
         setattr(settings, field, value)
