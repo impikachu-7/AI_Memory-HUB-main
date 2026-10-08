@@ -29,6 +29,32 @@ def _raise(exc: Exception, model: str | None = None):
     raise provider_error(exc, "nvidia", model) from exc
 
 
+def _catalog_model_id(api_key: str, selected_model: str) -> str | None:
+    """Resolve a short NVIDIA model alias only when the catalog match is unique.
+
+    NVIDIA documents canonical IDs such as ``meta/llama-3.1-8b-instruct``.
+    Some catalog clients or previously saved selections can omit the publisher
+    prefix. Never guess between duplicate suffixes and never rewrite a valid
+    exact ID.
+    """
+    try:
+        models = _client(api_key).models.list()
+    except Exception:
+        return None
+
+    ids = [getattr(model, "id", None) for model in models.data]
+    ids = [model_id for model_id in ids if isinstance(model_id, str) and model_id]
+    if selected_model in ids:
+        return selected_model
+
+    matches = [model_id for model_id in ids if model_id.rsplit("/", 1)[-1] == selected_model]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _is_not_found(exc: Exception) -> bool:
+    return getattr(exc, "status_code", None) == 404
+
+
 def _free_status(metadata: dict) -> bool | None:
     for field in ("is_free", "free"):
         if isinstance(metadata.get(field), bool):
@@ -72,23 +98,48 @@ class NvidiaProvider(LLMProvider):
 
     def generate(self, messages: list[dict], api_key: str | None, model_key: str, max_output_tokens: int | None = None) -> str:
         try:
+            key = _require_key(api_key)
             kwargs = {"model": model_key, "messages": messages}
             if max_output_tokens is not None:
                 kwargs["max_tokens"] = max_output_tokens
-            response = _client(_require_key(api_key)).chat.completions.create(**kwargs)
+            client = _client(key)
+            try:
+                response = client.chat.completions.create(**kwargs)
+            except Exception as exc:
+                canonical_id = _catalog_model_id(key, model_key) if _is_not_found(exc) else None
+                if not canonical_id or canonical_id == model_key:
+                    raise
+                kwargs["model"] = canonical_id
+                response = client.chat.completions.create(**kwargs)
             return response.choices[0].message.content or ""
         except Exception as exc:
             _raise(exc, model_key)
 
     def stream(self, messages: list[dict], api_key: str | None, model_key: str, max_output_tokens: int | None = None) -> Iterator[str]:
         try:
+            key = _require_key(api_key)
             kwargs = {"model": model_key, "messages": messages, "stream": True}
             if max_output_tokens is not None:
                 kwargs["max_tokens"] = max_output_tokens
-            with _client(_require_key(api_key)).chat.completions.create(**kwargs) as stream:
-                for chunk in stream:
-                    delta = chunk.choices[0].delta.content if chunk.choices else None
-                    if delta:
-                        yield delta
+            client = _client(key)
+            yielded = False
+            try:
+                stream = client.chat.completions.create(**kwargs)
+                with stream:
+                    for chunk in stream:
+                        delta = chunk.choices[0].delta.content if chunk.choices else None
+                        if delta:
+                            yielded = True
+                            yield delta
+            except Exception as exc:
+                canonical_id = _catalog_model_id(key, model_key) if _is_not_found(exc) and not yielded else None
+                if not canonical_id or canonical_id == model_key:
+                    raise
+                kwargs["model"] = canonical_id
+                with client.chat.completions.create(**kwargs) as stream:
+                    for chunk in stream:
+                        delta = chunk.choices[0].delta.content if chunk.choices else None
+                        if delta:
+                            yield delta
         except Exception as exc:
             _raise(exc, model_key)
