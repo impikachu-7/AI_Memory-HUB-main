@@ -34,4 +34,7 @@ def get_provider(name: str) -> LLMProvider:
     if name == "kie":
         from app.services.llm.kie_provider import KieProvider
         return KieProvider()
+    if name == "nvidia":
+        from app.services.llm.nvidia_provider import NvidiaProvider
+        return NvidiaProvider()
     raise HTTPException(400, f"Unknown provider: {name}")

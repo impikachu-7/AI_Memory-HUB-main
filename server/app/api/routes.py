@@ -338,7 +338,7 @@ def update_conversation(conversation_id: str, body: ConversationUpdate, db: Sess
             raise HTTPException(400, 'Provider not configured')
         if not provider_config.is_enabled:
             raise HTTPException(400, 'Provider not enabled')
-        if model.provider not in {'ollama', 'kie'} and not provider_config.encrypted_api_key:
+        if model.provider != 'ollama' and not provider_config.encrypted_api_key:
             raise HTTPException(400, 'Provider credentials unavailable')
     for field, value in changes.items(): setattr(item, field, value)
     db.commit(); db.refresh(item); return item
@@ -418,33 +418,8 @@ def generate(
         )
     )
 
-    # Live-provider models may not exist in the static registry. For configured
-    # cloud providers, allow an exact model returned by the provider's own
-    # discovery endpoint and materialize it into ModelRegistry for future use.
-    if model_entry is None and body.provider not in {'ollama', 'kie'}:
-        provider = get_provider(body.provider)
-        discovery_key = decrypt_api_key(config.encrypted_api_key) if config.encrypted_api_key else None
-        try:
-            discovered = provider.list_models(discovery_key)
-        except HTTPException:
-            raise
-        if not any(str(item.get('model_key')) == body.model_key for item in discovered):
-            raise HTTPException(400, 'Model not available from provider')
-        model_entry = ModelRegistry(
-            provider=body.provider,
-            model_key=body.model_key,
-            display_name=next(
-                (str(item.get('display_name') or body.model_key) for item in discovered if str(item.get('model_key')) == body.model_key),
-                body.model_key,
-            ),
-            is_local=False,
-            is_active=True,
-        )
-        db.add(model_entry)
-        db.flush()
-
     if model_entry is None:
-        raise HTTPException(400, 'Model not available')
+        raise HTTPException(400, 'Model not available. Refresh provider models and select an available model.')
 
     # 4. Save user message
     user_msg = messages.create(
@@ -507,7 +482,7 @@ def generate(
         accumulated = []
         try:
             provider = get_provider(provider_name)
-            if not encrypted_key and provider_name not in {'ollama', 'kie'}:
+            if not encrypted_key and provider_name != 'ollama':
                 yield json.dumps({'type': 'error', 'code': 'PROVIDER_KEY_MISSING', 'detail': 'API key not configured for this provider. Open Provider Settings and add your key.', 'provider': provider_name, 'model_key': model_key, 'recoverable': False, 'partial': False}) + '\n'
                 return
             # Decrypt immediately before use; result is local to this generator
@@ -663,7 +638,7 @@ def update_provider(provider_name: str, body: ProviderUpdate, db: Session = Depe
 @router.post('/providers/{provider_name}/test')
 def test_provider(provider_name: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
     config = db.scalar(select(ProviderConfiguration).where(ProviderConfiguration.user_id == user.id, ProviderConfiguration.provider == provider_name))
-    if config is None or (not config.encrypted_api_key and provider_name not in {'ollama', 'kie'}):
+    if config is None or (not config.encrypted_api_key and provider_name != 'ollama'):
         raise HTTPException(400, 'API key not configured for this provider. Open Provider Settings and add your key.')
     provider = get_provider(provider_name)
     api_key = decrypt_api_key(config.encrypted_api_key) if config.encrypted_api_key else None
@@ -708,6 +683,24 @@ def list_provider_models(provider_name: str, db: Session = Depends(get_db), user
     # Decrypt key only for the duration of this call; never stored or returned
     api_key = decrypt_api_key(config.encrypted_api_key) if config.encrypted_api_key else None
     raw_models = provider.list_models(api_key)
+    # Ollama's actual model registry belongs to its local connector.
+    if provider_name == 'ollama':
+        return [ProviderModelRead(**m) for m in raw_models]
+    # Refresh and upsert by stable (provider, model_key), retaining one registry row.
+    db.query(ModelRegistry).filter(ModelRegistry.provider == provider_name).update({ModelRegistry.is_active: False})
+    for item in raw_models:
+        model_key = str(item.get('model_key') or '')
+        if not model_key:
+            continue
+        existing = db.scalar(select(ModelRegistry).where(ModelRegistry.provider == provider_name, ModelRegistry.model_key == model_key))
+        if existing is None:
+            existing = ModelRegistry(provider=provider_name, model_key=model_key, display_name=str(item.get('display_name') or model_key), is_local=False, is_active=True)
+            db.add(existing)
+        existing.display_name = str(item.get('display_name') or model_key)[:150]
+        existing.context_window = item.get('context_length')
+        existing.is_free = item.get('is_free')
+        existing.is_active = True
+    db.commit()
     return [ProviderModelRead(**m) for m in raw_models]
 
 # ---------------------------------------------------------------------------
@@ -744,12 +737,10 @@ def register_local_ollama_models(body: list[LocalModelRegisterRequest], db: Sess
         raise HTTPException(400, 'Ollama is not enabled')
     result = []
     for item in body:
-        existing = db.scalar(select(ModelRegistry).where(ModelRegistry.model_key == item.model_key))
+        existing = db.scalar(select(ModelRegistry).where(ModelRegistry.provider == 'ollama', ModelRegistry.model_key == item.model_key))
         if existing is None:
             existing = ModelRegistry(provider='ollama', model_key=item.model_key, display_name=item.display_name or item.model_key, is_local=True, is_active=True, supports_streaming=True)
             db.add(existing)
-        elif existing.provider != 'ollama':
-            raise HTTPException(409, 'Model key belongs to another provider')
         else:
             existing.display_name = item.display_name or existing.display_name or item.model_key
             existing.is_local = True

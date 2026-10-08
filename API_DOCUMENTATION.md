@@ -20,6 +20,8 @@ Analytics endpoints accept an optional `days` query parameter (`7`, `30`, `90`, 
 
 Provider credentials use `POST /providers/{provider}/credentials`, `GET /providers`, `POST /providers/{provider}/test`, and `DELETE /providers/{provider}/credentials`. Keys are never returned.
 
+Users provide their own Groq, OpenRouter, KIE, and NVIDIA NIM API keys in Provider Settings. No shared `KIE_API_KEY` is required in Render. Groq models are discovered from its authenticated models endpoint. OpenRouter models are discovered dynamically and marked Free only when prompt and completion pricing are both zero; `openrouter/free` is also supported. KIE models are discovered from its authenticated `/openai/v1/models` catalog and are invoked through its Responses endpoint. NVIDIA NIM uses the OpenAI-compatible hosted API and discovers models from its models endpoint. Ollama runs locally and does not require an API key.
+
 All resource queries are scoped to the authenticated user. Provider keys are never returned.
 
 ## Local connector

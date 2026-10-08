@@ -42,8 +42,9 @@ class GroqProvider(LLMProvider):
         try:
             models = _client(api_key).models.list()
             return [
-                {"model_key": m.id, "display_name": m.id, "is_local": False}
-                for m in models.data
+                {"model_key": m.id, "display_name": m.id, "is_local": False,
+                 "context_length": getattr(m, "context_window", None), "is_free": None}
+                for m in models.data if getattr(m, "active", True)
             ]
         except HTTPException:
             raise

@@ -1,6 +1,6 @@
 """Kie Responses API provider.
 
-The Kie key is deployment-managed (KIE_API_KEY) and never reaches the browser.
+Users provide a Kie API key through their encrypted provider configuration.
 The API is non-streaming, so ``stream`` yields the completed text once while
 preserving the application's existing NDJSON response contract.
 """
@@ -10,35 +10,17 @@ import logging
 import httpx
 from fastapi import HTTPException
 
-from app.core.config import get_settings
 from app.services.llm.base import LLMProvider
 
 log = logging.getLogger(__name__)
 _URL = "https://api.kie.ai/codex/v1/responses"
-# The requested Kie Chat catalog.  These are intentionally limited to chat
-# models; Kie's image/video/audio task models use different asynchronous APIs.
-_MODELS = [
-    {"model_key": "gpt-6-astra", "display_name": "GPT-6 Astra", "is_local": False},
-    {"model_key": "gpt-5.6", "display_name": "GPT-5.6", "is_local": False},
-    {"model_key": "gpt-5.5", "display_name": "GPT-5.5", "is_local": False},
-    {"model_key": "gpt-5.2", "display_name": "GPT-5.2", "is_local": False},
-    {"model_key": "gemini-3.8-flash", "display_name": "Gemini 3.8 Flash", "is_local": False},
-    {"model_key": "gemini-3.7-flash", "display_name": "Gemini 3.7 Flash", "is_local": False},
-    {"model_key": "gemini-3.6-flash", "display_name": "Gemini 3.6 Flash", "is_local": False},
-    {"model_key": "claude-sonnet", "display_name": "Claude Sonnet", "is_local": False},
-    {"model_key": "claude-opus", "display_name": "Claude Opus", "is_local": False},
-    {"model_key": "grok-4.6", "display_name": "Grok 4.6 (via Kie)", "is_local": False},
-    {"model_key": "grok-4.5", "display_name": "Grok 4.5 (via Kie)", "is_local": False},
-    {"model_key": "grok-4.3", "display_name": "Grok 4.3 (via Kie)", "is_local": False},
-    {"model_key": "openai-codex", "display_name": "OpenAI Codex (via Kie)", "is_local": False},
-]
+_MODELS_URL = "https://api.kie.ai/openai/v1/models"
 
 
-def _key() -> str:
-    key = get_settings().kie_api_key
-    if not key:
-        raise HTTPException(503, "Kie is not configured")
-    return key
+def _key(api_key: str | None) -> str:
+    if not api_key:
+        raise HTTPException(401, "Provider authentication failed")
+    return api_key
 
 
 def _input(messages: list[dict]) -> list[dict]:
@@ -53,32 +35,66 @@ def _input(messages: list[dict]) -> list[dict]:
 
 
 def _text(payload: dict) -> str:
+    if not isinstance(payload, dict):
+        raise ValueError("Unexpected response shape")
     if isinstance(payload.get("output_text"), str):
         return payload["output_text"]
     parts = []
-    for item in payload.get("output", []):
+    output = payload.get("output", [])
+    if not isinstance(output, list):
+        raise ValueError("Unexpected response shape")
+    for item in output:
+        if not isinstance(item, dict):
+            continue
         for content in item.get("content", []):
-            if content.get("type") in {"output_text", "text"}:
+            if isinstance(content, dict) and content.get("type") in {"output_text", "text"}:
                 parts.append(content.get("text") or content.get("value") or "")
     return "".join(parts)
 
 
 class KieProvider(LLMProvider):
     def validate_credentials(self, api_key: str | None) -> None:
-        _key()
+        self.list_models(_key(api_key))
 
     def list_models(self, api_key: str | None) -> list[dict]:
-        _key()
-        return _MODELS
+        key = _key(api_key)
+        try:
+            response = httpx.get(_MODELS_URL, headers={"Authorization": f"Bearer {key}"}, timeout=30)
+        except httpx.RequestError as exc:
+            raise HTTPException(503, "Kie is temporarily unavailable") from exc
+        if response.status_code in {401, 403}:
+            raise HTTPException(401, "Provider authentication failed")
+        if response.status_code == 429:
+            raise HTTPException(429, "Provider rate limit reached")
+        if response.status_code >= 500:
+            raise HTTPException(503, "Kie is temporarily unavailable")
+        if response.status_code >= 400:
+            raise HTTPException(400, "Kie model discovery failed")
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise HTTPException(502, "Provider returned an unexpected response") from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(502, "Provider returned an unexpected response")
+        entries = payload.get("models") or payload.get("data") or []
+        if not isinstance(entries, list):
+            raise HTTPException(502, "Provider returned an unexpected response")
+        result = []
+        for item in entries:
+            if not isinstance(item, dict):
+                continue
+            model_key = item.get("slug") or item.get("id")
+            if model_key:
+                result.append({"model_key": str(model_key), "display_name": str(item.get("name") or model_key),
+                               "context_length": item.get("context_window"), "is_local": False})
+        return result
 
     def generate(self, messages: list[dict], api_key: str | None, model_key: str, max_output_tokens: int | None = None) -> str:
-        if model_key not in {model["model_key"] for model in _MODELS}:
-            raise HTTPException(400, "Model not available from provider")
         try:
             response = httpx.post(
                 _URL,
-                headers={"Authorization": f"Bearer {_key()}", "Content-Type": "application/json"},
-                json={"model": model_key, "input": _input(messages)},
+                headers={"Authorization": f"Bearer {_key(api_key)}", "Content-Type": "application/json"},
+                json={"model": model_key, "input": _input(messages), **({"max_output_tokens": max_output_tokens} if max_output_tokens is not None else {})},
                 timeout=60,
             )
         except httpx.RequestError as exc:
@@ -95,7 +111,7 @@ class KieProvider(LLMProvider):
             raise HTTPException(400, "Invalid request to provider")
         try:
             text = _text(response.json())
-        except ValueError as exc:
+        except (ValueError, TypeError, AttributeError) as exc:
             raise HTTPException(502, "Provider returned an unexpected response") from exc
         if not text:
             raise HTTPException(502, "Provider returned an empty response")

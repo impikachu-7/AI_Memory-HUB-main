@@ -82,6 +82,7 @@ export interface ProviderModelRead {
   display_name: string;
   context_length?: number;
   is_local: boolean;
+  is_free?: boolean | null;
 }
 
 export interface ModelRead {
@@ -91,6 +92,7 @@ export interface ModelRead {
   display_name: string;
   is_local: boolean;
   is_active: boolean;
+  is_free?: boolean | null;
 }
 
 interface ConversationResponse {
