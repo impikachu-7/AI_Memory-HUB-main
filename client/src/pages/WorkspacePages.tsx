@@ -202,10 +202,23 @@ function ChatPage() {
         );
         const finalText = localResponse;
         if (!finalText.trim()) throw new Error("Ollama returned an empty response.");
-        await api.conversations.completeLocalGeneration(activeConvId, prepared.message_id, finalText);
+        const completed = await api.conversations.completeLocalGeneration(
+          activeConvId,
+          prepared.message_id,
+          finalText,
+        );
+        const assistantMessage: Message = {
+          id: completed.message_id,
+          conversation_id: activeConvId,
+          role: "assistant",
+          content: finalText,
+          provider: "ollama",
+          model_id: selectedModel.model_key,
+          created_at: new Date().toISOString(),
+        };
+        setMessagesList((prev) => [...prev, assistantMessage]);
         setIsGenerating(false);
         setDraftResponse("");
-        setMessagesList(await api.conversations.listMessages(activeConvId));
       } catch (error) {
         setIsGenerating(false);
         setErrorMsg(error instanceof Error ? error.message : "Ollama generation failed.");
@@ -547,7 +560,7 @@ const handleSelectModel = async (model: ModelRead) => {
     return acc;
   }, {});
 
-  return <AppShell title="AI Model Selector" eyebrow="Models"><div className="mx-auto max-w-[1060px]"><PageIntro label="Your deliberate choice" title="Use the model you intend to use" copy="Only providers and models configured and enabled for your account are available here. Selecting one here does not silently switch a provider." /><div className="grid gap-6 lg:grid-cols-[0.7fr_1.3fr]"><Panel className="bg-[color:var(--ink-soft)] p-6 text-white"><Pill tone="dark"><span className="h-1.5 w-1.5 rounded-full bg-[color:var(--memory-teal-light)]" /> Current selection</Pill><p className="font-display mt-6 text-[29px] font-semibold tracking-[-0.055em]">{selectedModel?.display_name || "None selected"}</p><p className="mt-2 text-sm text-white/60">{selectedModel?.provider} · {selectedModel?.model_key || "No model active"}</p><div className="mt-8 border-t border-white/10 pt-5"><p className="text-xs font-bold">Your context stays intact</p><p className="mt-2 text-xs leading-5 text-white/60">Model changes are explicit. Conversation history and long-term memory remain attached to your workspace, not the model.</p></div></Panel><div className="space-y-4">{Object.entries(grouped).map(([provider, models]) => <Panel key={provider} className="overflow-hidden"><div className="flex items-center justify-between border-b border-border px-5 py-4"><span className="flex items-center gap-3"><span className="flex h-9 w-9 items-center justify-center rounded-xl bg-[color:color-mix(in_oklab,var(--memory-teal)_10%,transparent)]"><Bot className="h-4 w-4 text-[color:var(--memory-teal)]" /></span><span><span className="block text-sm font-bold uppercase">{provider}</span><span className="mt-0.5 block text-[10px] text-muted-foreground">Configured and available</span></span></span><Pill tone="teal">{models.length} models</Pill></div><div className="p-2">{models.map((model) => <button key={model.id} onClick={() => handleSelectModel(model)} className={cn("flex w-full items-center justify-between rounded-xl px-3 py-3 text-left transition hover:bg-secondary", selectedModel?.id === model.id && "bg-[color:color-mix(in_oklab,var(--memory-teal)_8%,transparent)]")}><span><span className="flex items-center gap-2 text-xs font-bold">{model.display_name}{model.is_local && <Pill tone="neutral">Local</Pill>}</span><span className="mt-1 block text-[10px] text-muted-foreground">{model.model_key}</span></span>{selectedModel?.id === model.id ? <span className="flex h-5 w-5 items-center justify-center rounded-full bg-[color:var(--memory-teal)]"><Check className="h-3 w-3 text-white" /></span> : <span className="h-5 w-5 rounded-full border border-border" />}</button>)}</div></Panel>)}</div></div><Panel className="mt-6 border-dashed bg-[color:var(--surface-warm)] p-5"><div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between"><div><p className="text-sm font-bold">Need another provider?</p><p className="mt-1 text-xs leading-5 text-muted-foreground">OpenAI, Anthropic, DeepSeek, Groq, and OpenRouter are not selectable until you securely configure and enable them in settings.</p></div><Link href="/settings/providers"><Button variant="secondary">Provider settings <ArrowRight className="h-4 w-4" /></Button></Link></div></Panel></div></AppShell>; }
+  return <AppShell title="AI Model Selector" eyebrow="Models"><div className="mx-auto max-w-[1060px]"><PageIntro label="Your deliberate choice" title="Use the model you intend to use" copy="Only providers and models configured and enabled for your account are available here. Selecting one here does not silently switch a provider." /><div className="grid gap-6 lg:grid-cols-[0.7fr_1.3fr]"><Panel className="bg-[color:var(--ink-soft)] p-6 text-white"><Pill tone="dark"><span className="h-1.5 w-1.5 rounded-full bg-[color:var(--memory-teal-light)]" /> Current selection</Pill><p className="font-display mt-6 text-[29px] font-semibold tracking-[-0.055em]">{selectedModel?.display_name || "None selected"}</p><p className="mt-2 text-sm text-white/60">{selectedModel?.provider} · {selectedModel?.model_key || "No model active"}</p><div className="mt-8 border-t border-white/10 pt-5"><p className="text-xs font-bold">Your context stays intact</p><p className="mt-2 text-xs leading-5 text-white/60">Model changes are explicit. Conversation history and long-term memory remain attached to your workspace, not the model.</p></div></Panel><div className="space-y-4">{Object.entries(grouped).map(([provider, models]) => <Panel key={provider} className="overflow-hidden"><div className="flex items-center justify-between border-b border-border px-5 py-4"><span className="flex items-center gap-3"><span className="flex h-9 w-9 items-center justify-center rounded-xl bg-[color:color-mix(in_oklab,var(--memory-teal)_10%,transparent)]"><Bot className="h-4 w-4 text-[color:var(--memory-teal)]" /></span><span><span className="block text-sm font-bold uppercase">{provider === "nvidia" ? "NVIDIA NIM" : provider}</span><span className="mt-0.5 block text-[10px] text-muted-foreground">Configured and available</span></span></span><Pill tone="teal">{models.length} models</Pill></div><div className="p-2">{models.map((model) => <button key={model.id} onClick={() => handleSelectModel(model)} className={cn("flex w-full items-center justify-between rounded-xl px-3 py-3 text-left transition hover:bg-secondary", selectedModel?.id === model.id && "bg-[color:color-mix(in_oklab,var(--memory-teal)_8%,transparent)]")}><span><span className="flex items-center gap-2 text-xs font-bold">{model.display_name}{model.is_local && <Pill tone="neutral">Local</Pill>}{model.is_free === true && <Pill tone="teal">Free</Pill>}</span><span className="mt-1 block text-[10px] text-muted-foreground">{model.model_key}</span></span>{selectedModel?.id === model.id ? <span className="flex h-5 w-5 items-center justify-center rounded-full bg-[color:var(--memory-teal)]"><Check className="h-3 w-3 text-white" /></span> : <span className="h-5 w-5 rounded-full border border-border" />}</button>)}</div></Panel>)}</div></div><Panel className="mt-6 border-dashed bg-[color:var(--surface-warm)] p-5"><div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between"><div><p className="text-sm font-bold">Need another provider?</p><p className="mt-1 text-xs leading-5 text-muted-foreground">Configure OpenAI, Anthropic, DeepSeek, Groq, OpenRouter, NVIDIA NIM, or KIE in Provider Settings. Ollama connects locally.</p></div><Link href="/settings/providers"><Button variant="secondary">Provider settings <ArrowRight className="h-4 w-4" /></Button></Link></div></Panel></div></AppShell>; }
 
 const ALL_PROVIDERS = [
   { id: "gemini", name: "Google Gemini", detail: "Connect to Google Gemini API" },
@@ -556,12 +569,14 @@ const ALL_PROVIDERS = [
   { id: "deepseek", name: "DeepSeek", detail: "Connect to DeepSeek API" },
   { id: "groq", name: "Groq", detail: "Connect to Groq Cloud API" },
   { id: "openrouter", name: "OpenRouter", detail: "Connect to OpenRouter API" },
-  { id: "kie", name: "Kie AI", detail: "Deployment-managed Kie model gateway", managed: true },
-  { id: "ollama", name: "Ollama (local)", detail: "Local Ollama host connection", local: true },
+  { id: "kie", name: "KIE", detail: "Users provide their own KIE API key" },
+  { id: "nvidia", name: "NVIDIA NIM", detail: "Users provide their own NVIDIA API key" },
+  { id: "ollama", name: "Ollama", detail: "Runs locally; no API key required", local: true },
 ];
 
 function ProvidersPage() {
   const [configuredList, setConfiguredList] = useState<ProviderRead[]>([]);
+  const [keyDrafts, setKeyDrafts] = useState<Record<string, string>>({});
 
   const loadProviders = () => {
     api.providers.listConfigured()
@@ -573,23 +588,21 @@ function ProvidersPage() {
     loadProviders();
   }, []);
 
-  const handleConnect = async (providerId: string) => {
-    let key: string | null = null;
-    if (providerId !== "ollama" && providerId !== "kie") {
-      key = window.prompt(`Enter your API key for ${providerId}:`);
-      if (key === null) return;
-      if (!key.trim()) {
-        toast.error("API key cannot be empty");
-        return;
-      }
-    }
+  const handleSaveKey = async (providerId: string) => {
+    const key = keyDrafts[providerId]?.trim();
+    if (!key) { toast.error("Enter an API key first"); return; }
     try {
-      await api.providers.configure(providerId, key, true);
-      toast.success(`${providerId} configured successfully`);
+      if (configuredList.some((item) => item.provider === providerId)) await api.providers.update(providerId, { api_key: key, is_enabled: true });
+      else await api.providers.configure(providerId, key, true);
+      setKeyDrafts((current) => ({ ...current, [providerId]: "" }));
+      toast.success(`${providerId} key saved securely`);
       loadProviders();
-    } catch (e: any) {
-      toast.error(e.message || "Failed to configure provider");
-    }
+    } catch (e: any) { toast.error(e.message || "Failed to save provider key"); }
+  };
+
+  const handleRefreshModels = async (providerId: string) => {
+    try { const models = await api.providers.listModels(providerId); toast.success(`${models.length} ${providerId} models refreshed`); }
+    catch (e: any) { toast.error(e.message || "Failed to refresh provider models"); }
   };
 
   const handleDisconnect = async (providerId: string) => {
@@ -636,7 +649,7 @@ function ProvidersPage() {
     const isConnected = !!config;
     const isEnabled = config?.is_enabled ?? false;
 
-    return <Panel key={provider.id} className="flex flex-col gap-4 p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5"><div className="flex items-center gap-4"><span className={cn("flex h-11 w-11 items-center justify-center rounded-xl", isConnected && isEnabled ? "bg-[color:color-mix(in_oklab,var(--memory-teal)_12%,transparent)]" : "bg-secondary")}><Globe2 className={cn("h-5 w-5", isConnected && isEnabled ? "text-[color:var(--memory-teal)]" : "text-muted-foreground")} /></span><span><span className="flex items-center gap-2"><span className="text-sm font-bold">{provider.name}</span><Pill tone={isConnected && isEnabled ? "teal" : "neutral"}>{isConnected ? (isEnabled ? "Connected & Enabled" : "Connected (Disabled)") : "Not Configured"}</Pill></span><span className="mt-1 block text-[11px] text-muted-foreground">{provider.detail}{provider.id === "kie" ? " · Uses server KIE_API_KEY" : ""}</span></span></div>{isConnected ? <div className="flex gap-2"><Button variant="secondary" onClick={() => handleToggle(provider.id, isEnabled)}>{isEnabled ? "Disable" : "Enable"}</Button><Button variant="secondary" onClick={() => void handleTest(provider.id)}>Test</Button><Button variant="secondary" onClick={() => handleDisconnect(provider.id)}>Disconnect</Button></div> : <Button onClick={() => handleConnect(provider.id)}>Connect provider <ArrowRight className="h-4 w-4" /></Button>}</Panel>;
+    return <Panel key={provider.id} className="flex flex-col gap-4 p-4 sm:p-5"><div className="flex items-center gap-4"><span className={cn("flex h-11 w-11 items-center justify-center rounded-xl", isConnected && isEnabled ? "bg-[color:color-mix(in_oklab,var(--memory-teal)_12%,transparent)]" : "bg-secondary")}><Globe2 className={cn("h-5 w-5", isConnected && isEnabled ? "text-[color:var(--memory-teal)]" : "text-muted-foreground")} /></span><span><span className="flex items-center gap-2"><span className="text-sm font-bold">{provider.name}</span><Pill tone={isConnected && isEnabled ? "teal" : "neutral"}>{isConnected ? (isEnabled ? "Connected & Enabled" : "Connected (Disabled)") : "Not Configured"}</Pill></span><span className="mt-1 block text-[11px] text-muted-foreground">{provider.detail}</span></span></div>{provider.id === "ollama" ? <><p className="text-xs text-muted-foreground">No API key required. Uses the local Ollama connector.</p>{!isConnected && <Button onClick={async () => { try { await api.providers.configure("ollama", null, true); loadProviders(); } catch (e: any) { toast.error(e.message || "Failed to enable Ollama"); } }}>Enable Ollama</Button>}</> : <><label className="block"><span className="mb-1.5 block text-xs font-semibold">API Key</span><input type="password" autoComplete="new-password" value={keyDrafts[provider.id] ?? ""} onChange={(event) => setKeyDrafts((current) => ({ ...current, [provider.id]: event.target.value }))} placeholder={isConnected ? "Key saved · enter a new key to rotate" : `Enter your ${provider.name} API key`} className="h-10 w-full rounded-xl border border-input bg-background px-3 text-xs outline-none focus:border-[color:var(--memory-teal)]" /><span className="mt-1 block text-[10px] text-muted-foreground">Your API key is encrypted and stored securely.</span></label><Button onClick={() => void handleSaveKey(provider.id)}>Save</Button></>}{isConnected && <div className="flex flex-wrap gap-2"><Button variant="secondary" onClick={() => void handleTest(provider.id)}>Test Connection</Button>{provider.id !== "ollama" && <Button variant="secondary" onClick={() => void handleRefreshModels(provider.id)}>Refresh Models</Button>}<Button variant="secondary" onClick={() => handleToggle(provider.id, isEnabled)}>{isEnabled ? "Disable" : "Enable"}</Button><Button variant="secondary" onClick={() => handleDisconnect(provider.id)}>Disconnect</Button></div>}</Panel>;
   })}</div><Panel className="mt-6 p-5"><div className="flex gap-3"><ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-[color:var(--memory-teal)]" /><div><p className="text-sm font-bold">Provider availability governs model selection</p><p className="mt-1 text-xs leading-5 text-muted-foreground">Only a configured, healthy provider returns models to the selection screen. AI Memory Hub does not automatically fall back to another provider when a model is unavailable.</p></div></div></Panel></div></AppShell>; }
 
 function ApiKeysPage() { return <AppShell title="API Key Management" eyebrow="Control center"><div className="mx-auto max-w-[970px]"><PageIntro label="Credential vault" title="Keep provider credentials off the client" copy="Provider credentials are designed to be encrypted and handled by the FastAPI backend. This screen shows connection state and last use—not a raw secret." action={<Button onClick={() => backendToast("Adding a credential")}><Plus className="h-4 w-4" /> Add credential</Button>} /><Panel className="overflow-hidden"><div className="grid grid-cols-[1.2fr_1fr_0.8fr_auto] gap-4 border-b border-border bg-[color:var(--surface-warm)] px-5 py-3 text-[10px] font-bold uppercase tracking-[0.12em] text-muted-foreground"><span>Provider</span><span>Key state</span><span>Last used</span><span /></div>{[['Google', 'Encrypted and available', 'Today, 10:41'], ['Ollama', 'Local connection — no cloud key', 'Today, 10:40'], ['OpenAI', 'Not configured', '—']].map(([provider, state, used]) => <div key={provider} className="grid grid-cols-[1.2fr_1fr_0.8fr_auto] items-center gap-4 border-b border-border px-5 py-4 last:border-0"><span className="flex items-center gap-2 text-xs font-bold"><KeyRound className="h-4 w-4 text-[color:var(--memory-teal)]" /> {provider}</span><span><Pill tone={state.includes('available') || state.includes('Local') ? 'teal' : 'neutral'}>{state}</Pill></span><span className="text-[11px] text-muted-foreground">{used}</span><IconButton label={`Manage ${provider} credential`} onClick={() => backendToast(`Managing ${provider} credential`)}><MoreHorizontal className="h-4 w-4" /></IconButton></div>)}</Panel><div className="mt-5 grid gap-4 sm:grid-cols-2"><Panel className="p-5"><LockKeyhole className="h-5 w-5 text-[color:var(--memory-teal)]" /><p className="mt-4 text-sm font-bold">No plaintext in the browser</p><p className="mt-2 text-xs leading-5 text-muted-foreground">The frontend only receives credential status. Secrets never appear in components, local storage, logs, or network-facing markup.</p></Panel><Panel className="p-5"><ShieldAlert className="h-5 w-5 text-amber-600 dark:text-amber-400" /><p className="mt-4 text-sm font-bold">Rotation stays explicit</p><p className="mt-2 text-xs leading-5 text-muted-foreground">Credential rotation and removal need an authenticated backend action, with clear provider-specific confirmation.</p></Panel></div></div></AppShell>; }

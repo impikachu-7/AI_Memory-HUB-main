@@ -53,10 +53,22 @@ class OpenRouterProvider(LLMProvider):
             raise HTTPException(401, "Provider authentication failed")
         try:
             models = _client(api_key).models.list()
-            return [
-                {"model_key": m.id, "display_name": getattr(m, "name", m.id) or m.id, "is_local": False}
-                for m in models.data
-            ]
+            discovered = []
+            for model in models.data:
+                metadata = model.model_dump() if hasattr(model, "model_dump") else {}
+                pricing = metadata.get("pricing") or getattr(model, "pricing", None) or {}
+                if not isinstance(pricing, dict):
+                    pricing = getattr(pricing, "model_dump", lambda: {})()
+                prompt = pricing.get("prompt")
+                completion = pricing.get("completion")
+                is_free = prompt is not None and completion is not None and float(prompt) == 0 and float(completion) == 0
+                discovered.append({"model_key": model.id, "display_name": getattr(model, "name", model.id) or model.id,
+                                   "is_local": False, "context_length": metadata.get("context_length"), "is_free": is_free})
+            # The provider's free model router is a supported route in its own right.
+            if not any(item["model_key"] == "openrouter/free" for item in discovered):
+                discovered.insert(0, {"model_key": "openrouter/free", "display_name": "Free Models Router", "is_local": False,
+                                      "context_length": 200000, "is_free": True})
+            return discovered
         except HTTPException:
             raise
         except Exception as exc:

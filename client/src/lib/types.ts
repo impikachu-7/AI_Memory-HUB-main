@@ -111,6 +111,7 @@ export interface ModelRead {
   max_output_tokens?: number | null;
   supports_streaming?: boolean | null;
   supports_temperature?: boolean | null;
+  is_free?: boolean | null;
 }
 
 export interface ProviderRead {

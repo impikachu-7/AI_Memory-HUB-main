@@ -5,6 +5,7 @@ AI Memory Hub is a user-owned memory layer for cloud and local AI models. React/
 ## Architecture
 
 - Cloud providers use each authenticated user's encrypted BYOK credential.
+- KIE, Groq, OpenRouter, and NVIDIA NIM credentials are user-provided; no deployment-wide `KIE_API_KEY` is required.
 - Ollama runs locally through the Local Connector on `127.0.0.1:8765`.
 - Memory retrieval is user-scoped, bounded, and controlled by persisted settings.
 - PostgreSQL stores users, conversations, messages, memories, credentials, and model registry data.

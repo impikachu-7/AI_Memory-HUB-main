@@ -82,6 +82,7 @@ export interface ProviderModelRead {
   display_name: string;
   context_length?: number;
   is_local: boolean;
+  is_free?: boolean | null;
 }
 
 export interface ModelRead {
@@ -91,6 +92,7 @@ export interface ModelRead {
   display_name: string;
   is_local: boolean;
   is_active: boolean;
+  is_free?: boolean | null;
 }
 
 interface ConversationResponse {
@@ -241,7 +243,7 @@ export const api = {
     update: (conversationId: string, patch: { title?: string; selected_model_id?: string | null }) =>
       request<ConversationResponse>(`/conversations/${conversationId}`, { method: "PATCH", body: JSON.stringify(patch) }).then(toConversationSummary),
     remove: (conversationId: string) => request<void>(`/conversations/${conversationId}`, { method: "DELETE" }),
-    listMessages: (conversationId: string) => request<Message[]>(`/conversations/${conversationId}/messages`),
+    listMessages: (conversationId: string) => request<Message[]>(`/conversations/${conversationId}/messages`, { cache: "no-store" }),
     export: () => request<Blob>("/privacy/export/conversations", {}, "blob"),
     prepareLocalGeneration: (conversationId: string, message: string, modelKey: string) =>
       request<{ message_id: string; model_key: string; messages: Array<{ role: string; content: string }> }>(

@@ -33,7 +33,6 @@ class Settings(BaseSettings):
     chroma_path: str = "./data/chroma"
     memory_retrieval_limit: int = 8
     ollama_base_url: str = "http://localhost:11434"
-    kie_api_key: str | None = None
     chat_history_limit: int = 20
     context_budget_chars: int = 12000
     log_level: str = "INFO"

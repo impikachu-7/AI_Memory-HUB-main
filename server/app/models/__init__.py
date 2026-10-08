@@ -120,9 +120,10 @@ class ProviderConfiguration(Timestamped, Base):
 
 class ModelRegistry(Timestamped, Base):
     __tablename__ = "model_registry"
+    __table_args__ = (UniqueConstraint("provider", "model_key", name="uq_model_registry_provider_model"),)
     id: Mapped[str] = uuid_pk()
     provider: Mapped[str] = mapped_column(String(50), index=True, nullable=False)
-    model_key: Mapped[str] = mapped_column(String(150), unique=True, nullable=False)
+    model_key: Mapped[str] = mapped_column(String(150), nullable=False)
     display_name: Mapped[str] = mapped_column(String(150), nullable=False)
     is_local: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
@@ -130,6 +131,7 @@ class ModelRegistry(Timestamped, Base):
     max_output_tokens: Mapped[int | None] = mapped_column()
     supports_streaming: Mapped[bool | None] = mapped_column()
     supports_temperature: Mapped[bool | None] = mapped_column()
+    is_free: Mapped[bool | None] = mapped_column(Boolean)
 
 
 class AnalyticsEvent(Timestamped, Base):

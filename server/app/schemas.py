@@ -58,7 +58,7 @@ class MemoryUpdate(BaseModel):
 class MemoryRead(ORM): id: str; content: str; category: str; source_conversation_id: str | None; importance: float; confidence: float; is_archived: bool; is_pinned: bool; created_at: datetime
 class MemorySearch(BaseModel): query: str = Field(min_length=1); limit: int = Field(default=8, ge=1, le=20)
 class MemorySearchResult(MemoryRead): score: float
-class ProviderCreate(BaseModel): provider: str = Field(pattern="^(openai|gemini|anthropic|deepseek|groq|openrouter|ollama|kie)$"); api_key: str | None = Field(default=None, min_length=8); is_enabled: bool = False
+class ProviderCreate(BaseModel): provider: str = Field(pattern="^(openai|gemini|anthropic|deepseek|groq|openrouter|ollama|kie|nvidia)$"); api_key: str | None = Field(default=None, min_length=8); is_enabled: bool = False
 class ProviderRead(ORM): id: str; provider: str; is_enabled: bool; created_at: datetime
 class ModelRead(ORM):
     id: str
@@ -71,6 +71,7 @@ class ModelRead(ORM):
     max_output_tokens: int | None = None
     supports_streaming: bool | None = None
     supports_temperature: bool | None = None
+    is_free: bool | None = None
 class AnalyticsRead(BaseModel): conversations: int; messages: int; memories: int
 class AnalyticsOverview(BaseModel):
     total_conversations: int
@@ -107,7 +108,7 @@ class SettingsUpdate(BaseModel):
 # Phase 5 — generation schemas
 class GenerateRequest(BaseModel):
     message: str = Field(min_length=1)
-    provider: str = Field(pattern="^(openai|gemini|anthropic|deepseek|groq|openrouter|ollama|kie)$")
+    provider: str = Field(pattern="^(openai|gemini|anthropic|deepseek|groq|openrouter|ollama|kie|nvidia)$")
     model_key: str = Field(min_length=1)
     image_url: HttpUrl | None = None
 
@@ -123,6 +124,7 @@ class ProviderModelRead(BaseModel):
     model_key: str
     display_name: str
     context_length: int | None = None
+    is_free: bool | None = None
     is_local: bool = False
 
 class LocalModelRegisterRequest(BaseModel):

@@ -969,3 +969,50 @@ def test_update_conversation_selected_model():
     assert r.status_code == 200
     assert r.json()['selected_model_id'] == model_id
 
+
+def test_kie_test_connection_requires_and_uses_user_credential():
+    token = signup('kie-user-key@example.com')
+    missing = client.post('/api/v1/providers/kie/test', headers=headers(token))
+    assert missing.status_code == 400
+    assert 'KIE_API_KEY' not in missing.text
+
+    configure_provider(token, provider='kie', api_key='kie-user-secret-123', is_enabled=True)
+    provider = MagicMock()
+    with patch('app.api.routes.get_provider', return_value=provider):
+        response = client.post('/api/v1/providers/kie/test', headers=headers(token))
+    assert response.status_code == 200
+    provider.validate_credentials.assert_called_once_with('kie-user-secret-123')
+    assert 'kie-user-secret-123' not in response.text
+
+
+def test_nvidia_provider_key_is_encrypted_and_not_serialized():
+    token = signup('nvidia-user-key@example.com')
+    secret = 'nvidia-user-secret-123'
+    response = configure_provider(token, provider='nvidia', api_key=secret)
+    assert response.status_code == 201
+    assert secret not in response.text
+    db = TestingSession()
+    row = db.scalar(select(ProviderConfiguration).where(ProviderConfiguration.provider == 'nvidia'))
+    assert row is not None and row.encrypted_api_key != secret
+    assert decrypt_api_key(row.encrypted_api_key) == secret
+    db.close()
+
+
+def test_provider_model_refresh_upserts_current_metadata():
+    token = signup('groq-refresh@example.com')
+    configure_provider(token, provider='groq', api_key='user-groq-secret-123')
+    provider = MagicMock()
+    provider.list_models.return_value = [
+        {'model_key': 'current-groq-model', 'display_name': 'Current Groq Model', 'context_length': 131072, 'is_free': None},
+    ]
+    with patch('app.api.routes.get_provider', return_value=provider):
+        first = client.get('/api/v1/providers/groq/models', headers=headers(token))
+        second = client.get('/api/v1/providers/groq/models', headers=headers(token))
+    assert first.status_code == 200 and second.status_code == 200
+    assert first.json()[0]['model_key'] == 'current-groq-model'
+    db = TestingSession()
+    rows = db.scalars(select(ModelRegistry).where(ModelRegistry.provider == 'groq', ModelRegistry.model_key == 'current-groq-model')).all()
+    assert len(rows) == 1
+    assert rows[0].context_window == 131072
+    db.close()
+
