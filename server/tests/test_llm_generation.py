@@ -998,6 +998,58 @@ def test_nvidia_provider_key_is_encrypted_and_not_serialized():
     db.close()
 
 
+def test_nvidia_selected_catalog_model_reaches_generation_with_users_key():
+    token = signup('nvidia-generation-selection@example.com')
+    conv_id = make_conversation(token)
+    model_key = 'meta/llama-3.1-8b-instruct'
+    seed_model(provider='nvidia', model_key=model_key, display_name='Llama 3.1 8B')
+    configure_provider(token, provider='nvidia', api_key='nvidia-user-generation-key')
+    provider = MagicMock()
+    provider.stream.return_value = iter(['NVIDIA response'])
+
+    with patch('app.api.routes.get_provider', return_value=provider):
+        response = client.post(
+            f'/api/v1/conversations/{conv_id}/generate',
+            headers=headers(token),
+            json={'message': 'Hi', 'provider': 'nvidia', 'model_key': model_key},
+        )
+
+    assert response.status_code == 200
+    assert 'NVIDIA response' in response.text
+    args = provider.stream.call_args.args
+    assert args[1] == 'nvidia-user-generation-key'
+    assert args[2] == model_key
+
+
+def test_nvidia_generation_404_uses_safe_model_unavailable_message():
+    from app.services.llm.errors import ProviderError
+
+    token = signup('nvidia-generation-404@example.com')
+    conv_id = make_conversation(token)
+    model_key = 'meta/retired-model'
+    seed_model(provider='nvidia', model_key=model_key, display_name='Retired model')
+    configure_provider(token, provider='nvidia', api_key='nvidia-user-generation-key')
+
+    def unavailable_stream(*_args, **_kwargs):
+        raise ProviderError('nvidia', model_key, 404, 'MODEL_NOT_FOUND', 'NotFoundError', 'provider detail is private')
+        yield
+
+    provider = MagicMock()
+    provider.stream.side_effect = unavailable_stream
+    with patch('app.api.routes.get_provider', return_value=provider):
+        response = client.post(
+            f'/api/v1/conversations/{conv_id}/generate',
+            headers=headers(token),
+            json={'message': 'Hi', 'provider': 'nvidia', 'model_key': model_key},
+        )
+
+    events = [json.loads(line) for line in response.text.strip().split('\n') if line]
+    error = next(event for event in events if event['type'] == 'error')
+    assert error['code'] == 'MODEL_NOT_FOUND'
+    assert error['detail'] == 'The selected model is unavailable from the provider.'
+    assert 'provider detail is private' not in response.text
+
+
 def test_provider_model_refresh_upserts_current_metadata():
     token = signup('groq-refresh@example.com')
     configure_provider(token, provider='groq', api_key='user-groq-secret-123')

@@ -39,6 +39,52 @@ def test_nvidia_chat_uses_openai_compatible_client():
     client.chat.completions.create.assert_called_once_with(model="nvidia/model-a", messages=[{"role": "user", "content": "Hi"}])
 
 
+def test_nvidia_generation_resolves_unique_catalog_alias_after_404():
+    from app.services.llm.nvidia_provider import NvidiaProvider
+
+    class ModelNotFound(Exception):
+        status_code = 404
+
+    client = MagicMock()
+    client.chat.completions.create.side_effect = [
+        ModelNotFound("private provider detail"),
+        SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="Resolved"))]),
+    ]
+    client.models.list.return_value.data = [_sdk_model("meta/llama-3.1-8b-instruct")]
+    with patch("openai.OpenAI", return_value=client):
+        response = NvidiaProvider().generate(
+            [{"role": "user", "content": "Hi"}],
+            "user-nvidia-key",
+            "llama-3.1-8b-instruct",
+        )
+
+    assert response == "Resolved"
+    assert client.chat.completions.create.call_args_list[0].kwargs["model"] == "llama-3.1-8b-instruct"
+    assert client.chat.completions.create.call_args_list[1].kwargs["model"] == "meta/llama-3.1-8b-instruct"
+    client.models.list.assert_called_once_with()
+
+
+def test_nvidia_generation_does_not_guess_between_duplicate_aliases():
+    from app.services.llm.nvidia_provider import NvidiaProvider
+    from app.services.llm.errors import ProviderError
+    import pytest
+
+    class ModelNotFound(Exception):
+        status_code = 404
+
+    client = MagicMock()
+    client.chat.completions.create.side_effect = ModelNotFound("private provider detail")
+    client.models.list.return_value.data = [
+        _sdk_model("publisher-a/shared-model"),
+        _sdk_model("publisher-b/shared-model"),
+    ]
+    with patch("openai.OpenAI", return_value=client), pytest.raises(ProviderError) as error:
+        NvidiaProvider().generate([{"role": "user", "content": "Hi"}], "user-nvidia-key", "shared-model")
+
+    assert error.value.code == "MODEL_NOT_FOUND"
+    assert client.chat.completions.create.call_count == 1
+
+
 def test_openrouter_discovery_marks_current_zero_pricing_and_includes_router():
     from app.services.llm.openrouter_provider import OpenRouterProvider
     client = MagicMock()
