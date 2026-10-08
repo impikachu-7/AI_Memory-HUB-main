@@ -19,6 +19,26 @@ _DEFAULT_HEADERS = {
 }
 
 
+def _supports_text_chat(metadata: dict) -> bool:
+    """Keep catalogs for embeddings, speech, and image generation out of chat."""
+    architecture = metadata.get("architecture")
+    if not isinstance(architecture, dict):
+        # Older OpenRouter responses may omit architecture; preserve the model
+        # rather than hiding it on incomplete metadata.
+        return True
+    input_modalities = architecture.get("input_modalities")
+    output_modalities = architecture.get("output_modalities")
+    if isinstance(input_modalities, list) and "text" not in input_modalities:
+        return False
+    if isinstance(output_modalities, list) and "text" not in output_modalities:
+        return False
+    modality = architecture.get("modality")
+    if isinstance(modality, str) and "->" in modality:
+        input_mode, output_mode = modality.split("->", 1)
+        return "text" in input_mode.split("+") and "text" in output_mode.split("+")
+    return True
+
+
 def _client(api_key: str):
     try:
         import openai
@@ -56,16 +76,24 @@ class OpenRouterProvider(LLMProvider):
             discovered = []
             for model in models.data:
                 metadata = model.model_dump() if hasattr(model, "model_dump") else {}
+                if not _supports_text_chat(metadata):
+                    continue
                 pricing = metadata.get("pricing") or getattr(model, "pricing", None) or {}
                 if not isinstance(pricing, dict):
                     pricing = getattr(pricing, "model_dump", lambda: {})()
                 prompt = pricing.get("prompt")
                 completion = pricing.get("completion")
                 is_free = prompt is not None and completion is not None and float(prompt) == 0 and float(completion) == 0
+                # This integration was added for free-model discovery. Paid
+                # catalog entries can be listed by OpenRouter while a user's
+                # account has no credits, then fail at generation with HTTP 402.
+                if not is_free:
+                    continue
                 discovered.append({"model_key": model.id, "display_name": getattr(model, "name", model.id) or model.id,
                                    "is_local": False, "context_length": metadata.get("context_length"), "is_free": is_free})
             # The provider's free model router is a supported route in its own right.
-            if not any(item["model_key"] == "openrouter/free" for item in discovered):
+            has_free_chat_model = any(item.get("is_free") is True for item in discovered)
+            if has_free_chat_model and not any(item["model_key"] == "openrouter/free" for item in discovered):
                 discovered.insert(0, {"model_key": "openrouter/free", "display_name": "Free Models Router", "is_local": False,
                                       "context_length": 200000, "is_free": True})
             return discovered

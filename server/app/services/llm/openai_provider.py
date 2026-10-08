@@ -9,6 +9,15 @@ from app.services.llm.errors import provider_error
 log = logging.getLogger(__name__)
 
 _OPENAI_ERRORS: dict[str, tuple[int, str]] = {}  # populated lazily after import
+_NON_CHAT_MODEL_MARKERS = (
+    "embedding", "-transcribe", "-transcription", "-tts", "-audio", "-realtime",
+    "-image", "-moderation",
+)
+
+
+def _supports_chat_completions(model_id: str) -> bool:
+    lowered = model_id.lower()
+    return not any(marker in lowered for marker in _NON_CHAT_MODEL_MARKERS)
 
 
 def _client(api_key: str):
@@ -45,6 +54,7 @@ class OpenAIProvider(LLMProvider):
                 {"model_key": m.id, "display_name": m.id, "is_local": False}
                 for m in models.data
                 if "gpt" in m.id or "o1" in m.id or "o3" in m.id or "o4" in m.id
+                if _supports_chat_completions(m.id)
             ]
         except HTTPException:
             raise

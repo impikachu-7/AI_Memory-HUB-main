@@ -6,7 +6,8 @@ from app.services.llm.registry import get_provider
 
 
 def _sdk_model(model_id, **metadata):
-    return SimpleNamespace(id=model_id, name=metadata.get("name", model_id), model_dump=lambda: metadata)
+    attributes = {key: value for key, value in metadata.items() if key != "name"}
+    return SimpleNamespace(id=model_id, name=metadata.get("name", model_id), model_dump=lambda: metadata, **attributes)
 
 
 def test_nvidia_provider_registered_and_discovers_models():
@@ -19,6 +20,19 @@ def test_nvidia_provider_registered_and_discovers_models():
     assert models[0]["model_key"] == "nvidia/model-a"
     assert models[0]["context_length"] == 128000
     assert models[0]["is_free"] is True
+
+
+def test_nvidia_discovery_excludes_non_chat_models():
+    from app.services.llm.nvidia_provider import NvidiaProvider
+    client = MagicMock()
+    client.models.list.return_value.data = [
+        _sdk_model("meta/llama-3.1-8b-instruct"),
+        _sdk_model("nvidia/nv-embedqa-e5-v5"),
+        _sdk_model("nvidia/whisper-large-v3"),
+    ]
+    with patch("openai.OpenAI", return_value=client):
+        models = NvidiaProvider().list_models("user-nvidia-key")
+    assert [model["model_key"] for model in models] == ["meta/llama-3.1-8b-instruct"]
 
 
 def test_nvidia_test_connection_checks_models_endpoint():
@@ -89,21 +103,54 @@ def test_openrouter_discovery_marks_current_zero_pricing_and_includes_router():
     from app.services.llm.openrouter_provider import OpenRouterProvider
     client = MagicMock()
     client.models.list.return_value.data = [
-        _sdk_model("vendor/free-model", pricing={"prompt": "0", "completion": "0"}),
-        _sdk_model("vendor/paid-model", pricing={"prompt": "0.1", "completion": "0.2"}),
+        _sdk_model("vendor/free-model", pricing={"prompt": "0", "completion": "0.0"}, architecture={"input_modalities": ["text"], "output_modalities": ["text"], "modality": "text->text"}),
+        _sdk_model("vendor/paid-model", pricing={"prompt": "0.1", "completion": "0.2"}, architecture={"input_modalities": ["text"], "output_modalities": ["text"], "modality": "text->text"}),
+        _sdk_model("vendor/image-model", pricing={"prompt": "0", "completion": "0"}, architecture={"input_modalities": ["text"], "output_modalities": ["image"], "modality": "text->image"}),
     ]
     with patch("openai.OpenAI", return_value=client):
         models = OpenRouterProvider().list_models("user-openrouter-key")
     by_id = {model["model_key"]: model for model in models}
     assert by_id["vendor/free-model"]["is_free"] is True
     assert by_id["vendor/paid-model"]["is_free"] is False
+    assert "vendor/image-model" not in by_id
     assert by_id["openrouter/free"]["is_free"] is True
+
+
+def test_openrouter_does_not_offer_free_router_without_a_free_chat_model():
+    from app.services.llm.openrouter_provider import OpenRouterProvider
+    client = MagicMock()
+    client.models.list.return_value.data = [
+        _sdk_model("vendor/paid-model", pricing={"prompt": "0.1", "completion": "0.2"}, architecture={"input_modalities": ["text"], "output_modalities": ["text"], "modality": "text->text"}),
+        _sdk_model("vendor/image-model", pricing={"prompt": "0", "completion": "0"}, architecture={"input_modalities": ["text"], "output_modalities": ["image"], "modality": "text->image"}),
+    ]
+    with patch("openai.OpenAI", return_value=client):
+        models = OpenRouterProvider().list_models("user-openrouter-key")
+    assert [model["model_key"] for model in models] == ["vendor/paid-model"]
 
 
 def test_groq_discovery_uses_live_catalog():
     from app.services.llm.groq_provider import GroqProvider
     client = MagicMock()
-    client.models.list.return_value.data = [_sdk_model("openai/gpt-oss-20b", context_window=131072)]
+    client.models.list.return_value.data = [
+        _sdk_model("openai/gpt-oss-20b", context_window=131072),
+        _sdk_model("whisper-large-v3", context_window=448),
+        _sdk_model("canopylabs/orpheus-v1-english", context_window=4000),
+        _sdk_model("llama-3.3-70b-versatile", active=False, context_window=131072),
+    ]
     with patch("openai.OpenAI", return_value=client):
         models = GroqProvider().list_models("user-groq-key")
-    assert models[0]["model_key"] == "openai/gpt-oss-20b"
+    assert [model["model_key"] for model in models] == ["openai/gpt-oss-20b"]
+
+
+def test_openai_discovery_excludes_non_chat_models():
+    from app.services.llm.openai_provider import OpenAIProvider
+    client = MagicMock()
+    client.models.list.return_value.data = [
+        _sdk_model("gpt-4o-mini"),
+        _sdk_model("gpt-4o-mini-transcribe"),
+        _sdk_model("gpt-image-1"),
+        _sdk_model("o3-mini"),
+    ]
+    with patch("openai.OpenAI", return_value=client):
+        models = OpenAIProvider().list_models("user-openai-key")
+    assert [model["model_key"] for model in models] == ["gpt-4o-mini", "o3-mini"]
