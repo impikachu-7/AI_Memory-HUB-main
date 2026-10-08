@@ -7,6 +7,26 @@ from app.services.llm.base import LLMProvider
 from app.services.llm.errors import provider_error
 
 _BASE_URL = "https://integrate.api.nvidia.com/v1"
+_NON_CHAT_MODEL_MARKERS = (
+    "embed", "rerank", "whisper", "speech", "transcrib", "tts", "flux",
+    "image-generation", "video-generation", "ising-calibration",
+)
+
+
+def _supports_chat_completions(model_id: str, metadata: dict) -> bool:
+    lowered = model_id.lower()
+    if any(marker in lowered for marker in _NON_CHAT_MODEL_MARKERS):
+        return False
+    endpoints = metadata.get("supported_endpoints")
+    if isinstance(endpoints, list):
+        return any("chat/completions" in str(endpoint).lower() for endpoint in endpoints)
+    modalities = metadata.get("modalities")
+    if isinstance(modalities, dict):
+        inputs = modalities.get("input") or modalities.get("input_modalities")
+        outputs = modalities.get("output") or modalities.get("output_modalities")
+        if isinstance(inputs, list) and isinstance(outputs, list):
+            return "text" in inputs and "text" in outputs
+    return True
 
 
 def _client(api_key: str):
@@ -88,6 +108,8 @@ class NvidiaProvider(LLMProvider):
                 raw = model.model_dump() if hasattr(model, "model_dump") else {}
                 model_key = getattr(model, "id", None)
                 if not model_key:
+                    continue
+                if not _supports_chat_completions(model_key, raw):
                     continue
                 result.append({"model_key": model_key, "display_name": raw.get("name") or model_key,
                                "is_local": False, "context_length": raw.get("context_length"),

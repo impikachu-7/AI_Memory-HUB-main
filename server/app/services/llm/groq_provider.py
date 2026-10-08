@@ -10,6 +10,33 @@ log = logging.getLogger(__name__)
 
 _BASE_URL = "https://api.groq.com/openai/v1"
 
+_NON_CHAT_MODEL_MARKERS = (
+    "whisper", "distil-whisper", "orpheus", "text-to-speech", "speech-to-text",
+    "transcription", "transcribe", "embedding", "rerank", "audio", "tts",
+)
+
+
+def _supports_chat_completions(model) -> bool:
+    """Groq's /models catalog also includes speech and other task models."""
+    model_id = getattr(model, "id", "")
+    if not isinstance(model_id, str) or not model_id:
+        return False
+    lowered = model_id.lower()
+    if any(marker in lowered for marker in _NON_CHAT_MODEL_MARKERS):
+        return False
+
+    metadata = model.model_dump() if hasattr(model, "model_dump") else {}
+    endpoints = metadata.get("supported_endpoints")
+    if isinstance(endpoints, list):
+        return any("chat/completions" in str(endpoint).lower() for endpoint in endpoints)
+    modalities = metadata.get("modalities")
+    if isinstance(modalities, dict):
+        inputs = modalities.get("input") or modalities.get("input_modalities")
+        outputs = modalities.get("output") or modalities.get("output_modalities")
+        if isinstance(inputs, list) and isinstance(outputs, list):
+            return "text" in inputs and "text" in outputs
+    return True
+
 
 def _client(api_key: str):
     try:
@@ -44,7 +71,7 @@ class GroqProvider(LLMProvider):
             return [
                 {"model_key": m.id, "display_name": m.id, "is_local": False,
                  "context_length": getattr(m, "context_window", None), "is_free": None}
-                for m in models.data if getattr(m, "active", True)
+                for m in models.data if getattr(m, "active", True) and _supports_chat_completions(m)
             ]
         except HTTPException:
             raise
