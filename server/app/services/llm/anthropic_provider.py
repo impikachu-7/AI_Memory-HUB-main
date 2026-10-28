@@ -1,4 +1,4 @@
-"""Anthropic Claude provider using Anthropic's live Models API."""
+"""Anthropic Claude provider — uses the official Anthropic Models API."""
 import logging
 from collections.abc import Iterator
 from fastapi import HTTPException
@@ -7,7 +7,6 @@ from app.services.llm.base import LLMProvider
 from app.services.llm.errors import provider_error
 
 log = logging.getLogger(__name__)
-
 
 def _client(api_key: str):
     try:
@@ -51,21 +50,20 @@ class AnthropicProvider(LLMProvider):
             raise HTTPException(401, "Provider authentication failed")
         try:
             page = _client(api_key).models.list(limit=1000)
-            result = []
-            for model in page.data:
-                model_key = getattr(model, "id", None)
-                if not model_key:
-                    continue
-                lifecycle = getattr(model, "lifecycle", None)
-                if lifecycle and lifecycle != "active":
-                    continue
-                result.append({
-                    "model_key": model_key,
-                    "display_name": getattr(model, "display_name", None) or model_key,
+            return [
+                {
+                    "model_key": model.id,
+                    "display_name": getattr(model, "display_name", None) or model.id,
                     "context_length": getattr(model, "max_input_tokens", None),
                     "is_local": False,
-                })
-            return result
+                    # First-party Claude inference is token-priced. Trial
+                    # credits are not a free model or free API tier.
+                    "is_free": False,
+                }
+                for model in page.data
+                if getattr(model, "id", None)
+                and (not getattr(model, "lifecycle", None) or model.lifecycle == "active")
+            ]
         except HTTPException:
             raise
         except Exception as exc:

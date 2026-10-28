@@ -86,7 +86,7 @@ class KieProvider(LLMProvider):
             model_key = item.get("slug") or item.get("id")
             if model_key:
                 result.append({"model_key": str(model_key), "display_name": str(item.get("name") or model_key),
-                               "context_length": item.get("context_window"), "is_local": False})
+                               "context_length": item.get("context_window"), "is_local": False, "is_free": False})
         return result
 
     def generate(self, messages: list[dict], api_key: str | None, model_key: str, max_output_tokens: int | None = None) -> str:

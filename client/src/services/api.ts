@@ -298,7 +298,6 @@ export const api = {
             else if (event.type === "done") {
               completed = true;
               onDone(event.message_id);
-              return true;
             } else if (event.type === "error") {
               const details: Record<string, string> = {
                 PROVIDER_AUTH_ERROR: "Provider authentication failed.",
@@ -315,11 +314,10 @@ export const api = {
               };
               const message = event.detail || details[event.code] || "Error during generation";
               const source = [event.provider, event.model_key].filter(Boolean).join(" · ");
-              const error = new Error(source ? `${message} (${source})` : message);
-              (error as Error & { code?: string }).code = event.code;
-              throw error;
+              const diagnosticId = event.request_id ? `Request ID: ${event.request_id}` : "";
+              throw new Error([source ? `${message} (${source})` : message, diagnosticId].filter(Boolean).join(" · "));
             }
-            return false;
+            return completed;
           };
           while (true) {
             const { done, value } = await reader.read();
@@ -328,14 +326,11 @@ export const api = {
             const lines = buffer.split("\n");
             buffer = lines.pop() ?? "";
             for (const line of lines) {
-              if (processLine(line)) {
-                await reader.cancel().catch(() => undefined);
-                return;
-              }
+              processLine(line);
             }
           }
           buffer += decoder.decode();
-          if (buffer.trim() && processLine(buffer)) return;
+          if (buffer.trim()) processLine(buffer);
           if (!completed) throw new Error("The connection ended before the model finished responding. Please try again.");
         })
         .catch((error) => {

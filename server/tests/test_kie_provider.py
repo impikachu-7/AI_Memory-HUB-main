@@ -45,7 +45,7 @@ def test_kie_model_discovery_uses_live_catalog():
     response = Mock(status_code=200, json=lambda: {"models": [{"slug": "gpt-5-5", "name": "GPT 5.5", "context_window": 272000}]})
     with patch("app.services.llm.kie_provider.httpx.get", return_value=response):
         models = KieProvider().list_models("user-owned-kie-secret")
-    assert models == [{"model_key": "gpt-5-5", "display_name": "GPT 5.5", "context_length": 272000, "is_local": False}]
+    assert models == [{"model_key": "gpt-5-5", "display_name": "GPT 5.5", "context_length": 272000, "is_local": False, "is_free": False}]
 
 
 def test_kie_rejects_malformed_model_catalog_safely():

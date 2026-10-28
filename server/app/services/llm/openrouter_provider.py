@@ -17,17 +17,37 @@ _DEFAULT_HEADERS = {
     "HTTP-Referer": "https://ai-memory-hub.app",
     "X-Title": "AI Memory Hub",
 }
+_NON_CHAT_MODEL_MARKERS = (
+    "content-safety", "safety-guard", "guardrail", "moderation", "classifier",
+    "embedding", "embed-", "rerank", "whisper", "transcrib", "text-to-speech",
+    "image-generation", "video-generation",
+)
 
 
-def _supports_text_chat(metadata: dict) -> bool:
-    """Keep catalogs for embeddings, speech, and image generation out of chat."""
+def _supports_text_chat(model_id: str, metadata: dict) -> bool:
+    """Keep specialized safety/task models out of the general chat picker."""
+    lowered_id = model_id.lower()
+    if any(marker in lowered_id for marker in _NON_CHAT_MODEL_MARKERS):
+        return False
+    name = str(metadata.get("name") or "").lower()
+    description = str(metadata.get("description") or "").lower()
+    if any(marker in name for marker in _NON_CHAT_MODEL_MARKERS):
+        return False
+    if any(marker in description for marker in (
+        "moderates both inputs", "safety classification", "content moderation",
+        "safety classifier", "embedding model", "reranking model",
+        "speech recognition model", "text-to-speech model",
+    )):
+        return False
+
     architecture = metadata.get("architecture")
     if not isinstance(architecture, dict):
-        # Older OpenRouter responses may omit architecture; preserve the model
-        # rather than hiding it on incomplete metadata.
-        return True
+        # Unknown modality is not sufficient evidence for a chat picker.
+        return False
     input_modalities = architecture.get("input_modalities")
     output_modalities = architecture.get("output_modalities")
+    if isinstance(input_modalities, list) and isinstance(output_modalities, list):
+        return "text" in input_modalities and "text" in output_modalities
     if isinstance(input_modalities, list) and "text" not in input_modalities:
         return False
     if isinstance(output_modalities, list) and "text" not in output_modalities:
@@ -36,7 +56,7 @@ def _supports_text_chat(metadata: dict) -> bool:
     if isinstance(modality, str) and "->" in modality:
         input_mode, output_mode = modality.split("->", 1)
         return "text" in input_mode.split("+") and "text" in output_mode.split("+")
-    return True
+    return False
 
 
 def _client(api_key: str):
@@ -78,14 +98,18 @@ class OpenRouterProvider(LLMProvider):
             discovered = []
             for model in models.data:
                 metadata = model.model_dump() if hasattr(model, "model_dump") else {}
-                if not _supports_text_chat(metadata):
+                if not _supports_text_chat(model.id, metadata):
                     continue
                 pricing = metadata.get("pricing") or getattr(model, "pricing", None) or {}
                 if not isinstance(pricing, dict):
                     pricing = getattr(pricing, "model_dump", lambda: {})()
                 prompt = pricing.get("prompt")
                 completion = pricing.get("completion")
-                is_free = prompt is not None and completion is not None and float(prompt) == 0 and float(completion) == 0
+                try:
+                    is_free = prompt is not None and completion is not None and float(prompt) == 0 and float(completion) == 0
+                except (TypeError, ValueError):
+                    # Incomplete or nonnumeric prices are unknown, not free.
+                    is_free = False
                 # This integration was added for free-model discovery. Paid
                 # catalog entries can be listed by OpenRouter while a user's
                 # account has no credits, then fail at generation with HTTP 402.

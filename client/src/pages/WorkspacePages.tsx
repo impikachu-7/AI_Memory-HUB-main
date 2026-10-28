@@ -7,7 +7,7 @@ import { cn } from "@/lib/utils";
 import {
   Archive, ArrowDownToLine, ArrowRight, BarChart3, Bell, Bot, BrainCircuit, CalendarClock, Check, ChevronDown, ChevronsUpDown, CircleAlert, Clock3, Copy, Download, Edit3, Ellipsis, ExternalLink, FileText, Filter, FolderOpen, Gauge, Globe2, KeyRound, LayoutDashboard, LockKeyhole, Mail, MessageSquareText, MoreHorizontal, Network, PanelRightClose, Pencil, Pin, Plus, RefreshCw, Search, SendHorizontal, Settings2, ShieldAlert, ShieldCheck, SlidersHorizontal, Sparkles, Tags, Trash2, Undo2, UserRound, X,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Link, useLocation, useRoute } from "wouter";
 import { Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip as ChartTooltip, XAxis, YAxis } from "recharts";
@@ -43,6 +43,23 @@ function ChatPage() {
   const [generationStatus, setGenerationStatus] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
   const [memoryEnabled, setMemoryEnabled] = useState(true);
+  const activeConvIdRef = useRef(activeConvId);
+  const generationAbortRef = useRef<AbortController | null>(null);
+  activeConvIdRef.current = activeConvId;
+
+  useEffect(() => {
+    return () => {
+      generationAbortRef.current?.abort();
+      generationAbortRef.current = null;
+    };
+  }, [activeConvId]);
+
+  useEffect(() => {
+    setIsGenerating(false);
+    setDraftResponse("");
+    setGenerationStatus("");
+    setErrorMsg("");
+  }, [activeConvId]);
 
   const activeConversation = conversationsList.find((c) => c.id === activeConvId);
 
@@ -236,26 +253,48 @@ function ChatPage() {
       model_key: selectedModel.model_key,
     };
 
+    const generationConversationId = activeConvId;
+    const generationModel = selectedModel;
+    let streamedResponse = "";
+
     api.conversations.generate(
-      activeConvId,
+      generationConversationId,
       req,
       (chunk) => {
+        streamedResponse += chunk;
+        if (activeConvIdRef.current !== generationConversationId) return;
         setGenerationStatus("");
         setDraftResponse((prev) => prev + chunk);
       },
-      () => {
+      (messageId) => {
+        if (activeConvIdRef.current !== generationConversationId) return;
         setIsGenerating(false);
         setDraftResponse("");
         setGenerationStatus("");
-        api.conversations.listMessages(activeConvId).then(setMessagesList);
+        const assistantMessage: Message = {
+          id: messageId,
+          conversation_id: generationConversationId,
+          role: "assistant",
+          content: streamedResponse,
+          provider: generationModel.provider,
+          model_id: generationModel.model_key,
+          created_at: new Date().toISOString(),
+        };
+        setMessagesList((prev) => prev.some((msg) => msg.id === messageId) ? prev : [...prev, assistantMessage]);
+        void api.conversations.listMessages(generationConversationId).then((msgs) => {
+          if (activeConvIdRef.current === generationConversationId) setMessagesList(msgs);
+        }).catch(() => undefined);
       },
       (err) => {
+        if (activeConvIdRef.current !== generationConversationId) return;
         setIsGenerating(false);
         setGenerationStatus("");
         setErrorMsg(err.message || "An error occurred");
       },
-      undefined,
-      (status) => setGenerationStatus(status),
+      (generationAbortRef.current = new AbortController()).signal,
+      (status) => {
+        if (activeConvIdRef.current === generationConversationId) setGenerationStatus(status);
+      },
     );
   };
 

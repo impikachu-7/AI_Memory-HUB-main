@@ -42,7 +42,7 @@ class DeepSeekProvider(LLMProvider):
         try:
             models = _client(api_key).models.list()
             return [
-                {"model_key": m.id, "display_name": m.id, "is_local": False}
+                {"model_key": m.id, "display_name": m.id, "is_local": False, "is_free": False}
                 for m in models.data
             ]
         except HTTPException:
