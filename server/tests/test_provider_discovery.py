@@ -196,6 +196,19 @@ def test_openai_compatible_clients_use_bounded_timeout_without_retries():
         assert sdk_client.call_args.kwargs["max_retries"] == 0
 
 
+def test_gemini_client_uses_bounded_timeout_and_no_sdk_retries():
+    from google.genai import types
+    from app.services.llm.gemini_provider import _client
+
+    with patch("google.genai.Client", return_value=MagicMock()) as sdk_client:
+        _client("user-gemini-key")
+
+    options = sdk_client.call_args.kwargs["http_options"]
+    assert isinstance(options, types.HttpOptions)
+    assert options.timeout == 45_000
+    assert options.retry_options.attempts == 1
+
+
 def test_openai_discovery_excludes_non_chat_models():
     from app.services.llm.openai_provider import OpenAIProvider
     client = MagicMock()
