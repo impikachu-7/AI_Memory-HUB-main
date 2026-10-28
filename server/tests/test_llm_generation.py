@@ -1051,6 +1051,68 @@ def test_nvidia_generation_404_uses_safe_model_unavailable_message():
     assert 'provider detail is private' not in response.text
 
 
+
+def test_openrouter_free_model_unavailable_falls_back_to_free_router():
+    from app.services.llm.errors import ProviderError
+
+    token = signup('openrouter-free-fallback@example.com')
+    conv_id = make_conversation(token)
+    model_key = 'nvidia/nemotron-3.5-super-vl:free'
+    seed_model(provider='openrouter', model_key=model_key, display_name='Nemotron 3.5 Super VL (free)')
+    configure_provider(token, provider='openrouter', api_key='openrouter-user-generation-key')
+
+    provider = MagicMock()
+
+    def stream(_messages, _api_key, selected_model, _max_output_tokens=None):
+        if selected_model == model_key:
+            raise ProviderError('openrouter', selected_model, 404, 'MODEL_NOT_FOUND', 'NotFoundError')
+        assert selected_model == 'openrouter/free'
+        return iter(['Free router response'])
+
+    provider.stream.side_effect = stream
+    with patch('app.api.routes.get_provider', return_value=provider):
+        response = client.post(
+            f'/api/v1/conversations/{conv_id}/generate',
+            headers=headers(token),
+            json={'message': 'Hello', 'provider': 'openrouter', 'model_key': model_key},
+        )
+
+    assert response.status_code == 200
+    assert 'retrying with OpenRouter’s free model router' in response.text
+    assert 'Free router response' in response.text
+    assert [call.args[2] for call in provider.stream.call_args_list] == [model_key, 'openrouter/free']
+    saved = client.get(f'/api/v1/conversations/{conv_id}/messages', headers=headers(token)).json()
+    assert any(message['role'] == 'assistant' and message['model_id'] == 'openrouter/free' for message in saved)
+
+
+def test_openrouter_free_model_partial_response_does_not_retry():
+    from app.services.llm.errors import ProviderError
+
+    token = signup('openrouter-free-partial@example.com')
+    conv_id = make_conversation(token)
+    model_key = 'google/gemma-4-31b-it:free'
+    seed_model(provider='openrouter', model_key=model_key, display_name='Gemma 4 31B (free)')
+    configure_provider(token, provider='openrouter', api_key='openrouter-user-generation-key')
+
+    provider = MagicMock()
+
+    def stream(_messages, _api_key, selected_model, _max_output_tokens=None):
+        assert selected_model == model_key
+        yield 'Partial response'
+        raise ProviderError('openrouter', selected_model, 404, 'MODEL_NOT_FOUND', 'NotFoundError')
+
+    provider.stream.side_effect = stream
+    with patch('app.api.routes.get_provider', return_value=provider):
+        response = client.post(
+            f'/api/v1/conversations/{conv_id}/generate',
+            headers=headers(token),
+            json={'message': 'Hello', 'provider': 'openrouter', 'model_key': model_key},
+        )
+
+    assert 'Partial response' in response.text
+    assert 'OpenRouter’s free model router' not in response.text
+    assert provider.stream.call_count == 1
+
 def test_provider_model_refresh_upserts_current_metadata():
     token = signup('groq-refresh@example.com')
     configure_provider(token, provider='groq', api_key='user-groq-secret-123')
