@@ -9,10 +9,15 @@ from app.services.llm.errors import provider_error
 def _client(api_key: str):
     try:
         from google import genai
+        from google.genai import types
     except ImportError as exc:
         raise HTTPException(503, "google-genai SDK is not installed") from exc
     try:
-        return genai.Client(api_key=api_key)
+        http_options = types.HttpOptions(
+            timeout=45_000,
+            retry_options=types.HttpRetryOptions(attempts=1),
+        )
+        return genai.Client(api_key=api_key, http_options=http_options)
     except Exception as exc:
         raise provider_error(exc, "gemini") from exc
 
