@@ -763,23 +763,73 @@ def list_provider_models(provider_name: str, db: Session = Depends(get_db), user
 
 @router.get('/models', response_model=list[ModelRead])
 def list_models(db: Session = Depends(get_db), user: User = Depends(current_user)):
-    """Return ModelRegistry rows only for providers the user has enabled."""
-    enabled_providers = db.scalars(
-        select(ProviderConfiguration.provider).where(
+    """Refresh enabled providers' live catalogs before returning selectable models.
+
+    The migration-seeded registry is only a bootstrap. It can outlive provider
+    model IDs, so chat must use the current user's BYOK catalogs instead of
+    presenting stale IDs as available.
+    """
+    configs = db.scalars(
+        select(ProviderConfiguration).where(
             ProviderConfiguration.user_id == user.id,
             ProviderConfiguration.is_enabled.is_(True),
         )
     ).all()
-    if not enabled_providers:
+    if not configs:
         return []
-    return list(
-        db.scalars(
-            select(ModelRegistry).where(
-                ModelRegistry.is_active.is_(True),
-                ModelRegistry.provider.in_(enabled_providers),
+
+    discovered: list[ModelRegistry] = []
+    for config in configs:
+        if config.provider == 'ollama':
+            discovered.extend(db.scalars(
+                select(ModelRegistry).where(
+                    ModelRegistry.provider == 'ollama',
+                    ModelRegistry.is_active.is_(True),
+                )
+            ).all())
+            continue
+
+        try:
+            api_key = decrypt_api_key(config.encrypted_api_key) if config.encrypted_api_key else None
+            raw_models = get_provider(config.provider).list_models(api_key)
+        except Exception as exc:
+            # A provider outage should not hide models from other configured
+            # providers, and cached/stale rows should not be offered as live.
+            log.warning(
+                "Model discovery failed provider=%s error_type=%s",
+                config.provider,
+                type(exc).__name__,
             )
-        )
-    )
+            continue
+
+        db.query(ModelRegistry).filter(
+            ModelRegistry.provider == config.provider
+        ).update({ModelRegistry.is_active: False}, synchronize_session=False)
+        for item in raw_models:
+            model_key = str(item.get('model_key') or '').strip()
+            if not model_key:
+                continue
+            entry = db.scalar(select(ModelRegistry).where(
+                ModelRegistry.provider == config.provider,
+                ModelRegistry.model_key == model_key,
+            ))
+            if entry is None:
+                entry = ModelRegistry(
+                    provider=config.provider,
+                    model_key=model_key,
+                    display_name=str(item.get('display_name') or model_key)[:150],
+                    is_local=False,
+                    is_active=True,
+                )
+                db.add(entry)
+            entry.display_name = str(item.get('display_name') or model_key)[:150]
+            entry.context_window = item.get('context_length')
+            entry.is_free = item.get('is_free')
+            entry.is_active = True
+            discovered.append(entry)
+
+    db.commit()
+    return discovered
 
 @router.post('/providers/ollama/local-models', response_model=list[ModelRead])
 def register_local_ollama_models(body: list[LocalModelRegisterRequest], db: Session = Depends(get_db), user: User = Depends(current_user)):
