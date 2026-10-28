@@ -5,6 +5,7 @@ import hmac
 import json
 import logging
 import secrets
+import threading
 import time
 import uuid
 from urllib.parse import urlencode
@@ -25,9 +26,13 @@ from app.services.memory_engine import extract_from_conversation, retrieve, vect
 from app.services.llm import get_provider
 from app.services.llm import context_builder
 from app.services.llm.errors import ProviderError, provider_error
+from app.services.llm.free_model_policy import verified_catalog
 from app.services.data_export import export_conversations, export_memories, export_user_data
 
 log = logging.getLogger(__name__)
+_MODEL_CATALOG_CACHE_TTL_SECONDS = 300
+_MODEL_CATALOG_CACHE: dict[tuple[str, str, str], tuple[float, list[dict]]] = {}
+_MODEL_CATALOG_CACHE_LOCK = threading.Lock()
 OAUTH_STATE_COOKIE_NAME = "ai_memory_hub_oauth_state"
 
 
@@ -61,6 +66,35 @@ def clear_oauth_state_cookie(response: Response) -> None:
 
 router = APIRouter()
 conversations, messages, memories, providers = (OwnedRepository(x) for x in (Conversation, Message, Memory, ProviderConfiguration))
+
+
+def discover_free_catalog(user_id: str, config: ProviderConfiguration, force_refresh: bool = False) -> list[dict]:
+    """Return this user's recently verified free models for a configured provider.
+
+    Credentials are decrypted only for the provider call. Cache entries are
+    scoped by user and configuration version so account entitlements cannot
+    leak into another user's model selector.
+    """
+    config_version = config.updated_at.isoformat() if config.updated_at else str(config.id)
+    cache_key = (user_id, config.provider, config_version)
+    now = time.monotonic()
+    if not force_refresh:
+        with _MODEL_CATALOG_CACHE_LOCK:
+            cached = _MODEL_CATALOG_CACHE.get(cache_key)
+            if cached and now - cached[0] < _MODEL_CATALOG_CACHE_TTL_SECONDS:
+                return [dict(item) for item in cached[1]]
+    try:
+        api_key = decrypt_api_key(config.encrypted_api_key) if config.encrypted_api_key else None
+        catalog = verified_catalog(config.provider, get_provider(config.provider).list_models(api_key))
+    except Exception:
+        # An expired cache is never presented as currently verified after a
+        # failed refresh. Existing registry rows and conversation history stay.
+        with _MODEL_CATALOG_CACHE_LOCK:
+            _MODEL_CATALOG_CACHE.pop(cache_key, None)
+        raise
+    with _MODEL_CATALOG_CACHE_LOCK:
+        _MODEL_CATALOG_CACHE[cache_key] = (now, [dict(item) for item in catalog])
+    return catalog
 
 def record_event(db: Session, user_id: str, event_type: str, provider: str | None = None, model_key: str | None = None, is_local: bool | None = None, metadata: dict | None = None):
     db.add(AnalyticsEvent(user_id=user_id, event_type=event_type, provider=provider, model_key=model_key, is_local=is_local, metadata_=metadata or {}))
@@ -332,7 +366,11 @@ def update_conversation(conversation_id: str, body: ConversationUpdate, db: Sess
     item = conversations.get(db, user.id, conversation_id)
     changes = body.model_dump(exclude_unset=True)
     if 'selected_model_id' in changes and changes['selected_model_id'] is not None:
-        model = db.scalar(select(ModelRegistry).where(ModelRegistry.id == changes['selected_model_id'], ModelRegistry.is_active.is_(True)))
+        model = db.scalar(select(ModelRegistry).where(
+            ModelRegistry.id == changes['selected_model_id'],
+            ModelRegistry.is_active.is_(True),
+            (ModelRegistry.is_free.is_(True) | ModelRegistry.is_local.is_(True)),
+        ))
         if model is None:
             raise HTTPException(400, 'Model not available')
         provider_config = db.scalar(select(ProviderConfiguration).where(ProviderConfiguration.user_id == user.id, ProviderConfiguration.provider == model.provider))
@@ -417,11 +455,23 @@ def generate(
             ModelRegistry.provider == body.provider,
             ModelRegistry.model_key == body.model_key,
             ModelRegistry.is_active.is_(True),
+            (ModelRegistry.is_free.is_(True) | ModelRegistry.is_local.is_(True)),
         )
     )
 
     if model_entry is None:
-        raise HTTPException(400, 'Model not available. Refresh provider models and select an available model.')
+        raise HTTPException(400, 'Model is not available in the verified free catalog. Refresh provider models and select a free model.')
+
+    # Catalog listing proves current ID/access metadata, not merely that a
+    # stale database seed once contained this model. Verify the exact ID against
+    # this user's current (short-lived cached) BYOK catalog before sending it.
+    try:
+        live_catalog = discover_free_catalog(user.id, config)
+    except Exception as exc:
+        log.warning("Generation catalog verification failed provider=%s error_type=%s", body.provider, type(exc).__name__)
+        raise HTTPException(503, 'Could not verify this provider’s free model catalog. Refresh models and try again.') from exc
+    if not any(item.get('model_key') == body.model_key for item in live_catalog):
+        raise HTTPException(400, 'This model is no longer available in the verified free catalog. Refresh models and select another model.')
 
     # 4. Save user message
     user_msg = messages.create(
@@ -450,11 +500,13 @@ def generate(
 
     provider_name = body.provider
     model_key = body.model_key
+    request_id = uuid.uuid4().hex
     user_id = user.id
     max_output_tokens = model_entry.max_output_tokens
     estimated_context_characters = sum(len(str(message.get('content', ''))) for message in llm_messages)
     log.info(
-        "LLM generation request provider=%s model=%s memory_enabled=%s messages=%s context_chars=%s",
+        "LLM generation request request_id=%s provider=%s model=%s memory_enabled=%s messages=%s context_chars=%s",
+        request_id,
         provider_name,
         model_key,
         memory_enabled,
@@ -485,10 +537,14 @@ def generate(
     def event_stream():
         accumulated = []
         started_at = time.monotonic()
+        first_token_at = None
+        chunk_count = 0
+        retry_count = 0
         response_model_key = model_key
         yield json.dumps({
             'type': 'status',
             'message': f'Request sent to {provider_name.capitalize()}; waiting for its first response…',
+            'request_id': request_id,
         }) + '\n'
         try:
             provider = get_provider(provider_name)
@@ -500,12 +556,17 @@ def generate(
             try:
                 chunks = provider.stream(llm_messages, api_key, model_key, max_output_tokens)
                 for chunk in chunks:
+                    if first_token_at is None:
+                        first_token_at = time.monotonic()
+                    chunk_count += 1
                     accumulated.append(chunk)
-                    yield json.dumps({'type': 'chunk', 'text': chunk}) + '\n'
+                    yield json.dumps({'type': 'chunk', 'text': chunk, 'request_id': request_id}) + '\n'
             except HTTPException as exc:
-                # A free catalog model may not have a live route for this request.
-                # OpenRouter's free router chooses another routable free chat model.
-                # Retry only before emitting text to avoid duplicate partial answers.
+                # OpenRouter's :free catalog entries can remain listed even
+                # when that exact route has no live endpoint for this request.
+                # Its free router chooses another currently routable free chat
+                # model. Retry only before any text has been emitted, so a
+                # partial answer is never duplicated or silently switched.
                 can_fallback = (
                     provider_name == 'openrouter'
                     and model_key.endswith(':free')
@@ -516,6 +577,7 @@ def generate(
                 if not can_fallback:
                     raise
                 response_model_key = 'openrouter/free'
+                retry_count = 1
                 log.warning(
                     "OpenRouter free model unavailable; retrying with free router requested_model=%s",
                     model_key,
@@ -523,22 +585,30 @@ def generate(
                 yield json.dumps({
                     'type': 'status',
                     'message': 'That free model has no available route right now; trying OpenRouter’s free model router…',
+                    'request_id': request_id,
                 }) + '\n'
                 for chunk in provider.stream(llm_messages, api_key, response_model_key, max_output_tokens):
+                    if first_token_at is None:
+                        first_token_at = time.monotonic()
+                    chunk_count += 1
                     accumulated.append(chunk)
-                    yield json.dumps({'type': 'chunk', 'text': chunk}) + '\n'
+                    yield json.dumps({'type': 'chunk', 'text': chunk, 'request_id': request_id}) + '\n'
         except HTTPException as exc:
             normalized = normalized_provider_error(exc, response_model_key)
             log.error(
-                "%s generation failed provider=%s model=%s status=%s error_type=%s duration_seconds=%.1f",
+                "%s generation failed request_id=%s provider=%s model=%s status=%s error_type=%s duration_seconds=%.1f time_to_first_token_seconds=%s chunks=%s retries=%s streaming=true",
                 provider_name.capitalize(),
+                request_id,
                 provider_name,
                 response_model_key,
                 normalized.provider_status,
                 normalized.error_type,
                 time.monotonic() - started_at,
+                round(first_token_at - started_at, 3) if first_token_at is not None else None,
+                chunk_count,
+                retry_count,
             )
-            record_event(db, user_id, 'message_failed', provider_name, model_key, model_entry.is_local)
+            record_event(db, user_id, 'message_failed', provider_name, response_model_key, model_entry.is_local)
             db.commit()
             yield json.dumps({
                 'type': 'error',
@@ -548,10 +618,17 @@ def generate(
                 'model_key': response_model_key,
                 'recoverable': True,
                 'partial': bool(accumulated),
+                'request_id': request_id,
             }) + '\n'
             return
         except Exception as exc:
-            log.exception("Unexpected error during streaming for provider=%s model=%s", provider_name, model_key)
+            log.error(
+                "Unexpected generation failure request_id=%s provider=%s model=%s error_type=%s",
+                request_id,
+                provider_name,
+                model_key,
+                type(exc).__name__,
+            )
             yield json.dumps({
                 'type': 'error',
                 'code': 'INTERNAL_ERROR',
@@ -560,6 +637,7 @@ def generate(
                 'model_key': model_key,
                 'recoverable': True,
                 'partial': bool(accumulated),
+                'request_id': request_id,
             }) + '\n'
             return
 
@@ -576,15 +654,38 @@ def generate(
                     model_id=response_model_key,
                 )
                 db.add(asst_msg)
-                db.commit()
                 record_event(db, user_id, 'message_completed', provider_name, response_model_key, model_entry.is_local)
                 db.commit()
                 db.refresh(asst_msg)
-                # Run existing memory extraction heuristic
-                extract_from_conversation(db, user_id, conversation_id)
-                yield json.dumps({'type': 'done', 'message_id': asst_msg.id}) + '\n'
-            except Exception:
-                log.exception("Failed to persist assistant message")
+                yield json.dumps({'type': 'done', 'message_id': asst_msg.id, 'request_id': request_id}) + '\n'
+                elapsed = time.monotonic() - started_at
+                log.info(
+                    "LLM generation completed request_id=%s provider=%s model=%s status=200 duration_seconds=%.3f time_to_first_token_seconds=%s chunks=%s retries=%s streaming=true",
+                    request_id,
+                    provider_name,
+                    response_model_key,
+                    elapsed,
+                    round(first_token_at - started_at, 3) if first_token_at is not None else None,
+                    chunk_count,
+                    retry_count,
+                )
+                # The client receives `done` before memory extraction so slow
+                # indexing cannot keep the chat in a loading state. The client
+                # drains the stream to EOF, allowing this work to finish.
+                try:
+                    extract_from_conversation(db, user_id, conversation_id)
+                except Exception as exc:
+                    log.error(
+                        "Memory extraction failed after generation request_id=%s error_type=%s",
+                        request_id,
+                        type(exc).__name__,
+                    )
+            except Exception as exc:
+                log.error(
+                    "Failed to persist assistant message request_id=%s error_type=%s",
+                    request_id,
+                    type(exc).__name__,
+                )
                 yield json.dumps({'type': 'error', 'detail': 'Failed to save response'}) + '\n'
         else:
             record_event(db, user_id, 'message_failed', provider_name, model_key, model_entry.is_local)
@@ -594,15 +695,16 @@ def generate(
                 'code': 'EMPTY_RESPONSE',
                 'detail': 'The provider finished without returning a response. Try again or select another model.',
                 'provider': provider_name,
-                'model_key': model_key,
+                'model_key': response_model_key,
                 'recoverable': True,
                 'partial': False,
+                'request_id': request_id,
             }) + '\n'
 
     return StreamingResponse(
         event_stream(),
         media_type='application/x-ndjson',
-        headers={'Cache-Control': 'no-cache, no-transform', 'X-Accel-Buffering': 'no'},
+        headers={'Cache-Control': 'no-cache, no-transform', 'X-Accel-Buffering': 'no', 'X-Request-ID': request_id},
     )
 
 
@@ -733,26 +835,31 @@ def list_provider_models(provider_name: str, db: Session = Depends(get_db), user
     )
     if config is None:
         raise HTTPException(404, 'Provider not configured')
-    provider = get_provider(provider_name)
-    # Decrypt key only for the duration of this call; never stored or returned
-    api_key = decrypt_api_key(config.encrypted_api_key) if config.encrypted_api_key else None
-    raw_models = provider.list_models(api_key)
-    # Ollama's actual model registry belongs to its local connector.
+    # This is the explicit Provider Settings refresh action; always bypass the
+    # short chat catalog cache and only persist evidence-backed free models.
+    raw_models = discover_free_catalog(user.id, config, force_refresh=True)
     if provider_name == 'ollama':
         return [ProviderModelRead(**m) for m in raw_models]
-    # Refresh and upsert by stable (provider, model_key), retaining one registry row.
-    db.query(ModelRegistry).filter(ModelRegistry.provider == provider_name).update({ModelRegistry.is_active: False})
+    # Keep old rows for history, but make paid/unknown models impossible to
+    # select. Unique(provider, model_key) keeps this upsert idempotent.
+    # A successful catalog refresh is authoritative for this provider: keep
+    # historical rows, but deactivate models that disappeared or are no longer
+    # positively verified as free. A failed discovery never reaches this write.
+    db.query(ModelRegistry).filter(
+        ModelRegistry.provider == provider_name,
+    ).update({ModelRegistry.is_active: False}, synchronize_session=False)
     for item in raw_models:
         model_key = str(item.get('model_key') or '')
         if not model_key:
             continue
         existing = db.scalar(select(ModelRegistry).where(ModelRegistry.provider == provider_name, ModelRegistry.model_key == model_key))
         if existing is None:
-            existing = ModelRegistry(provider=provider_name, model_key=model_key, display_name=str(item.get('display_name') or model_key), is_local=False, is_active=True)
+            existing = ModelRegistry(provider=provider_name, model_key=model_key, display_name=str(item.get('display_name') or model_key), is_local=False, is_active=True, is_free=True)
             db.add(existing)
         existing.display_name = str(item.get('display_name') or model_key)[:150]
         existing.context_window = item.get('context_length')
-        existing.is_free = item.get('is_free')
+        existing.is_free = True
+        existing.is_local = False
         existing.is_active = True
     db.commit()
     return [ProviderModelRead(**m) for m in raw_models]
@@ -764,12 +871,7 @@ def list_provider_models(provider_name: str, db: Session = Depends(get_db), user
 
 @router.get('/models', response_model=list[ModelRead])
 def list_models(db: Session = Depends(get_db), user: User = Depends(current_user)):
-    """Refresh enabled providers' live catalogs before returning selectable models.
-
-    The migration-seeded registry is only a bootstrap. It can outlive provider
-    model IDs, so chat must use the current user's BYOK catalogs instead of
-    presenting stale IDs as available.
-    """
+    """Return only live, free-verified catalogs from enabled user providers."""
     configs = db.scalars(
         select(ProviderConfiguration).where(
             ProviderConfiguration.user_id == user.id,
@@ -779,44 +881,35 @@ def list_models(db: Session = Depends(get_db), user: User = Depends(current_user
     if not configs:
         return []
 
-    discovered: list[ModelRegistry] = list(db.scalars(
-        select(ModelRegistry).where(
+    discovered: list[ModelRegistry] = []
+    remote_configs = []
+    if any(config.provider == 'ollama' for config in configs):
+        discovered.extend(db.scalars(select(ModelRegistry).where(
             ModelRegistry.provider == 'ollama',
+            ModelRegistry.is_local.is_(True),
             ModelRegistry.is_active.is_(True),
-        )
-    ).all()) if any(config.provider == 'ollama' for config in configs) else []
-
+        )).all())
     remote_configs = [config for config in configs if config.provider != 'ollama']
 
     def fetch_catalog(config: ProviderConfiguration):
-        api_key = decrypt_api_key(config.encrypted_api_key) if config.encrypted_api_key else None
-        return get_provider(config.provider).list_models(api_key)
+        return discover_free_catalog(user.id, config)
 
-    # Refresh providers concurrently so a slow catalog does not multiply page
-    # load latency by the number of configured providers.
-    with ThreadPoolExecutor(max_workers=min(4, len(remote_configs) or 1)) as executor:
-        futures = {executor.submit(fetch_catalog, config): config for config in remote_configs}
+    # Providers have different latency and rate limits. Fetch in bounded
+    # parallel and keep all SQLAlchemy writes on this request's DB thread.
+    with ThreadPoolExecutor(max_workers=min(4, len(remote_configs) or 1)) as pool:
+        futures = {pool.submit(fetch_catalog, config): config for config in remote_configs}
         for future in as_completed(futures):
             config = futures[future]
             try:
-                raw_models = future.result()
+                catalog = future.result()
             except Exception as exc:
-                # Stale cached IDs should not be offered when this user's live
-                # catalog could not be verified.
-                log.warning(
-                    "Model discovery failed provider=%s error_type=%s",
-                    config.provider,
-                    type(exc).__name__,
-                )
+                log.warning("Free model discovery failed provider=%s error_type=%s", config.provider, type(exc).__name__)
                 continue
-
             db.query(ModelRegistry).filter(
-                ModelRegistry.provider == config.provider
+                ModelRegistry.provider == config.provider,
             ).update({ModelRegistry.is_active: False}, synchronize_session=False)
-            for item in raw_models:
-                model_key = str(item.get('model_key') or '').strip()
-                if not model_key:
-                    continue
+            for item in catalog:
+                model_key = item['model_key']
                 entry = db.scalar(select(ModelRegistry).where(
                     ModelRegistry.provider == config.provider,
                     ModelRegistry.model_key == model_key,
@@ -828,14 +921,15 @@ def list_models(db: Session = Depends(get_db), user: User = Depends(current_user
                         display_name=str(item.get('display_name') or model_key)[:150],
                         is_local=False,
                         is_active=True,
+                        is_free=True,
                     )
                     db.add(entry)
                 entry.display_name = str(item.get('display_name') or model_key)[:150]
                 entry.context_window = item.get('context_length')
-                entry.is_free = item.get('is_free')
+                entry.is_free = True
+                entry.is_local = False
                 entry.is_active = True
                 discovered.append(entry)
-
     db.commit()
     return discovered
 
@@ -969,3 +1063,4 @@ def privacy_export_memories(db: Session = Depends(get_db), user: User = Depends(
 @router.get('/privacy/export/conversations')
 def privacy_export_conversations(db: Session = Depends(get_db), user: User = Depends(current_user)):
     return export_conversations(db, user.id)
+
