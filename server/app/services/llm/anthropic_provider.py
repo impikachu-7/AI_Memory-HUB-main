@@ -1,10 +1,4 @@
-"""Anthropic Claude provider — uses the official anthropic SDK.
-
-Anthropic does not expose a public REST endpoint to list available models,
-so list_models() returns a curated list of current Claude models.
-This list is populated from https://docs.anthropic.com/en/docs/about-claude/models
-and should be updated when new models are released.
-"""
+"""Anthropic Claude provider using Anthropic's live Models API."""
 import logging
 from collections.abc import Iterator
 from fastapi import HTTPException
@@ -14,21 +8,11 @@ from app.services.llm.errors import provider_error
 
 log = logging.getLogger(__name__)
 
-# Curated from Anthropic docs — current as of implementation date.
-# model_key values are the exact API identifiers accepted by the Messages API.
-_CLAUDE_MODELS = [
-    {"model_key": "claude-opus-4-5", "display_name": "Claude Opus 4.5", "is_local": False},
-    {"model_key": "claude-sonnet-4-5", "display_name": "Claude Sonnet 4.5", "is_local": False},
-    {"model_key": "claude-haiku-3-5", "display_name": "Claude Haiku 3.5", "is_local": False},
-    {"model_key": "claude-opus-4-0", "display_name": "Claude Opus 4", "is_local": False},
-    {"model_key": "claude-sonnet-4-0", "display_name": "Claude Sonnet 4", "is_local": False},
-]
-
 
 def _client(api_key: str):
     try:
         import anthropic
-        return anthropic.Anthropic(api_key=api_key)
+        return anthropic.Anthropic(api_key=api_key, timeout=45.0, max_retries=0)
     except ImportError as exc:
         raise HTTPException(503, "anthropic SDK is not installed") from exc
 
@@ -56,19 +40,36 @@ class AnthropicProvider(LLMProvider):
         if not api_key:
             raise HTTPException(401, "Provider authentication failed")
         try:
-            # Cheapest possible validation: count tokens on an empty string
-            _client(api_key).messages.count_tokens(
-                model="claude-haiku-3-5",
-                messages=[{"role": "user", "content": "hi"}],
-            )
+            _client(api_key).models.list(limit=1)
         except HTTPException:
             raise
         except Exception as exc:
             _safe_raise(exc)
 
     def list_models(self, api_key: str | None) -> list[dict]:
-        # Anthropic has no public list-models endpoint; return curated list.
-        return list(_CLAUDE_MODELS)
+        if not api_key:
+            raise HTTPException(401, "Provider authentication failed")
+        try:
+            page = _client(api_key).models.list(limit=1000)
+            result = []
+            for model in page.data:
+                model_key = getattr(model, "id", None)
+                if not model_key:
+                    continue
+                lifecycle = getattr(model, "lifecycle", None)
+                if lifecycle and lifecycle != "active":
+                    continue
+                result.append({
+                    "model_key": model_key,
+                    "display_name": getattr(model, "display_name", None) or model_key,
+                    "context_length": getattr(model, "max_input_tokens", None),
+                    "is_local": False,
+                })
+            return result
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _safe_raise(exc)
 
     def generate(self, messages: list[dict], api_key: str | None, model_key: str, max_output_tokens: int | None = None) -> str:
         if not api_key:
