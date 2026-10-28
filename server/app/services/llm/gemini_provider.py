@@ -4,20 +4,23 @@ from fastapi import HTTPException
 
 from app.services.llm.base import LLMProvider
 from app.services.llm.errors import provider_error
+from app.services.llm.free_model_policy import is_verified_free_model
 
 
 def _client(api_key: str):
     try:
         from google import genai
-        from google.genai import types
     except ImportError as exc:
         raise HTTPException(503, "google-genai SDK is not installed") from exc
     try:
-        http_options = types.HttpOptions(
-            timeout=45_000,
-            retry_options=types.HttpRetryOptions(attempts=1),
+        from google.genai import types
+        return genai.Client(
+            api_key=api_key,
+            http_options=types.HttpOptions(
+                timeout=45_000,
+                retry_options=types.HttpRetryOptions(attempts=1),
+            ),
         )
-        return genai.Client(api_key=api_key, http_options=http_options)
     except Exception as exc:
         raise provider_error(exc, "gemini") from exc
 
@@ -77,13 +80,16 @@ class GeminiProvider(LLMProvider):
                 if not name:
                     continue
                 display = getattr(model, "display_name", None) or name
-                result.append(
-                    {
-                        "model_key": name,
+                item = {
+                        # Use the name form accepted by generate_content. The
+                        # REST resource's `models/` prefix is not sent there.
+                        "model_key": _model_name(name),
                         "display_name": display,
                         "is_local": False,
+                        "is_free": True,
                     }
-                )
+                if is_verified_free_model("gemini", item):
+                    result.append(item)
             return result
         except HTTPException:
             raise
@@ -177,3 +183,4 @@ class GeminiProvider(LLMProvider):
             raise
         except Exception as exc:
             _safe_raise(exc, model_key)
+
