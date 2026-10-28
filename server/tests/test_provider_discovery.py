@@ -206,4 +206,3 @@ def test_openai_discovery_excludes_non_chat_models():
     with patch("openai.OpenAI", return_value=client):
         models = OpenAIProvider().list_models("user-openai-key")
     assert [model["model_key"] for model in models] == ["gpt-4o-mini", "o3-mini"]
-
