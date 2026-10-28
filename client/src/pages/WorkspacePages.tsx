@@ -293,7 +293,9 @@ function ChatPage() {
         setErrorMsg(err.message || "An error occurred");
       },
       (generationAbortRef.current = new AbortController()).signal,
-      (status) => setGenerationStatus(status),
+      (status) => {
+        if (activeConvIdRef.current === generationConversationId) setGenerationStatus(status);
+      },
     );
   };
 
