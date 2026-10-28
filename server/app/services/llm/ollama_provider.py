@@ -67,7 +67,7 @@ class OllamaProvider(LLMProvider):
                 raise HTTPException(503, "Ollama is not available")
             data = r.json()
             return [
-                {"model_key": m["name"], "display_name": m["name"], "is_local": True}
+                {"model_key": m["name"], "display_name": m["name"], "is_local": True, "is_free": True}
                 for m in data.get("models", [])
             ]
         except HTTPException:
@@ -102,3 +102,4 @@ class OllamaProvider(LLMProvider):
             raise
         except Exception as exc:
             _safe_raise(exc)
+
