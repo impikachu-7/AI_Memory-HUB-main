@@ -69,4 +69,3 @@ def verified_catalog(provider: str, models: list[dict]) -> list[dict]:
         seen.add(model_key)
         result.append({**model, "model_key": model_key, "is_free": provider != "ollama", "is_local": provider == "ollama"})
     return result
-
