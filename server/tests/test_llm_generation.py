@@ -1202,4 +1202,3 @@ def test_provider_model_refresh_upserts_current_metadata():
     assert rows[0].context_window == 131072
     db.close()
 
-
