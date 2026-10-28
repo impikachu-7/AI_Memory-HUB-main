@@ -119,4 +119,3 @@ class KieProvider(LLMProvider):
 
     def stream(self, messages: list[dict], api_key: str | None, model_key: str, max_output_tokens: int | None = None) -> Iterator[str]:
         yield self.generate(messages, api_key, model_key, max_output_tokens)
-
