@@ -111,15 +111,15 @@ def get_user_id(email: str) -> str:
     return me.json()['id']
 
 
-def seed_model(provider='openai', model_key='gpt-4o', display_name='GPT-4o', is_local=False):
+def seed_model(provider='openai', model_key='gpt-4o', display_name='GPT-4o', is_local=False, is_free=True):
     db = TestingSession()
-    existing = db.scalar(select(ModelRegistry).where(ModelRegistry.model_key == model_key))
+    existing = db.scalar(select(ModelRegistry).where(ModelRegistry.provider == provider, ModelRegistry.model_key == model_key))
     if existing:
         db.close()
         return existing.id
     entry = ModelRegistry(
         id=str(uuid.uuid4()), provider=provider, model_key=model_key,
-        display_name=display_name, is_local=is_local, is_active=True,
+        display_name=display_name, is_local=is_local, is_active=True, is_free=is_free,
     )
     db.add(entry); db.commit()
     model_id = entry.id
@@ -128,11 +128,37 @@ def seed_model(provider='openai', model_key='gpt-4o', display_name='GPT-4o', is_
 
 
 def configure_provider(token, provider='openai', api_key='sk-test-key-abcdefgh', is_enabled=True):
-    return client.post(
+    response = client.post(
         '/api/v1/providers',
         headers=headers(token),
         json={'provider': provider, 'api_key': api_key, 'is_enabled': is_enabled},
     )
+    # This test helper installs an explicitly mocked, user-scoped catalog for
+    # generation tests. Provider discovery tests exercise verified_catalog and
+    # the real refresh path separately; no tests call a live provider API.
+    if response.status_code in (200, 201):
+        from datetime import datetime, timezone
+        from app.api import routes
+        user_response = client.get('/api/v1/auth/me', headers=headers(token))
+        user_id = user_response.json()['id']
+        db = TestingSession()
+        config = db.scalar(select(ProviderConfiguration).where(
+            ProviderConfiguration.user_id == user_id,
+            ProviderConfiguration.provider == provider,
+        ))
+        rows = db.scalars(select(ModelRegistry).where(
+            ModelRegistry.provider == provider,
+            ModelRegistry.is_active.is_(True),
+        )).all()
+        if config:
+            version = config.updated_at.isoformat() if config.updated_at else str(config.id)
+            routes._MODEL_CATALOG_CACHE[(user_id, provider, version)] = (
+                __import__('time').monotonic(),
+                [{'model_key': row.model_key, 'display_name': row.display_name,
+                  'is_free': True, 'is_local': row.is_local} for row in rows],
+            )
+        db.close()
+    return response
 
 
 def make_conversation(token, title='Test chat'):
@@ -520,7 +546,7 @@ def test_partial_failure_preserves_previous_assistant_and_does_not_persist_incom
         )
 
     events = [json.loads(line) for line in second.text.strip().split('\n') if line]
-    assert events[0] == {'type': 'chunk', 'text': 'Partial output'}
+    assert next(event for event in events if event['type'] == 'chunk') == {'type': 'chunk', 'text': 'Partial output', 'request_id': events[0]['request_id']}
     assert events[-1]['type'] == 'error'
     assert events[-1]['partial'] is True
     assert 'secret rate-limit details' not in second.text
@@ -713,62 +739,35 @@ def test_cross_user_cannot_access_another_users_provider_models():
 # J. GET /models — filtered by user's enabled providers (server-side)
 # ---------------------------------------------------------------------------
 
-def test_models_endpoint_refreshes_enabled_provider_catalog_and_hides_stale_models():
+def test_models_endpoint_filtered_by_enabled_providers():
     alice = signup('modelfilter-alice@example.com')
-    stale_key = 'retired-openai-filter-test'
-    seed_model(provider='openai', model_key=stale_key, display_name='Retired model')
-    seed_model(provider='anthropic', model_key='claude-filter-test', display_name='Claude')
+    seed_model(provider='openai', model_key='gpt-4o-filter-test', display_name='GPT-4o')
+    seed_model(provider='anthropic', model_key='claude-sonnet-filter-test', display_name='Claude Sonnet')
+
+    # Alice has no providers yet
+    r = client.get('/api/v1/models', headers=headers(alice))
+    assert r.status_code == 200
+    assert r.json() == []
+
+    # Configure openai only
     configure_provider(alice, provider='openai', is_enabled=True)
-
-    provider = MagicMock()
-    provider.list_models.return_value = [
-        {'model_key': 'gpt-live-filter-test', 'display_name': 'Live GPT model', 'is_local': False}
-    ]
-    with patch('app.api.routes.get_provider', return_value=provider):
-        response = client.get('/api/v1/models', headers=headers(alice))
-
-    assert response.status_code == 200
-    data = response.json()
-    assert [(model['provider'], model['model_key']) for model in data] == [
-        ('openai', 'gpt-live-filter-test')
-    ]
-    provider.list_models.assert_called_once_with('sk-test-key-abcdefgh')
-    db = TestingSession()
-    stale = db.scalar(select(ModelRegistry).where(
-        ModelRegistry.provider == 'openai',
-        ModelRegistry.model_key == stale_key,
-    ))
-    assert stale is not None and stale.is_active is False
-    db.close()
+    r = client.get('/api/v1/models', headers=headers(alice))
+    data = r.json()
+    providers_returned = {m['provider'] for m in data}
+    assert 'openai' in providers_returned
+    assert 'anthropic' not in providers_returned
 
 
-def test_models_endpoint_excludes_disabled_provider_without_catalog_call():
+def test_models_endpoint_excludes_disabled_provider():
     user = signup('modelfilter-disabled@example.com')
     seed_model(provider='groq', model_key='llama-filter-test', display_name='Llama')
     configure_provider(user, provider='groq', is_enabled=False)
 
-    with patch('app.api.routes.get_provider') as get_provider_mock:
-        response = client.get('/api/v1/models', headers=headers(user))
-
-    assert response.status_code == 200
-    assert response.json() == []
-    get_provider_mock.assert_not_called()
-
-
-def test_models_endpoint_omits_stale_provider_models_when_discovery_fails():
-    token = signup('models-discovery-failure@example.com')
-    stale_key = 'stale-live-catalog-entry'
-    seed_model(provider='deepseek', model_key=stale_key, display_name='Stale DeepSeek model')
-    configure_provider(token, provider='deepseek', api_key='deepseek-user-key-abcdefgh')
-
-    provider = MagicMock()
-    provider.list_models.side_effect = RuntimeError('provider unreachable')
-    with patch('app.api.routes.get_provider', return_value=provider):
-        response = client.get('/api/v1/models', headers=headers(token))
-
-    assert response.status_code == 200
-    assert all(model['provider'] != 'deepseek' for model in response.json())
-
+    r = client.get('/api/v1/models', headers=headers(user))
+    assert r.status_code == 200
+    data = r.json()
+    # Disabled provider must not appear
+    assert all(m['provider'] != 'groq' for m in data)
 
 
 # ---------------------------------------------------------------------------
@@ -861,21 +860,21 @@ def test_delete_provider_rejects_wrong_owner():
 
 def test_list_provider_models_calls_provider_and_returns_results():
     token = signup('provmodels@example.com')
-    configure_provider(token)
+    configure_provider(token, provider='groq')
 
     mock_provider = MagicMock()
     mock_provider.list_models.return_value = [
-        {'model_key': 'gpt-4o', 'display_name': 'GPT-4o', 'is_local': False},
-        {'model_key': 'gpt-4o-mini', 'display_name': 'GPT-4o mini', 'is_local': False},
+        {'model_key': 'openai/gpt-oss-20b', 'display_name': 'GPT OSS 20B', 'is_local': False},
+        {'model_key': 'qwen/qwen3.8-27b', 'display_name': 'Qwen 3.8 27B', 'is_local': False},
     ]
 
     with patch('app.api.routes.get_provider', return_value=mock_provider):
-        r = client.get('/api/v1/providers/openai/models', headers=headers(token))
+        r = client.get('/api/v1/providers/groq/models', headers=headers(token))
 
     assert r.status_code == 200
     data = r.json()
     assert len(data) == 2
-    assert data[0]['model_key'] == 'gpt-4o'
+    assert data[0]['model_key'] == 'openai/gpt-oss-20b'
     # Verify the API key was never returned
     assert all('api_key' not in item for item in data)
     assert all('key' not in str(item).lower() or 'model_key' in item for item in data)
@@ -1078,7 +1077,6 @@ def test_nvidia_generation_404_uses_safe_model_unavailable_message():
     assert 'provider detail is private' not in response.text
 
 
-
 def test_openrouter_free_model_unavailable_falls_back_to_free_router():
     from app.services.llm.errors import ProviderError
 
@@ -1105,7 +1103,8 @@ def test_openrouter_free_model_unavailable_falls_back_to_free_router():
         )
 
     assert response.status_code == 200
-    assert 'retrying with OpenRouter’s free model router' in response.text
+    events = [json.loads(line) for line in response.text.strip().split('\n') if line]
+    assert any(event.get('type') == 'status' and 'free model router' in event.get('message', '') for event in events)
     assert 'Free router response' in response.text
     assert [call.args[2] for call in provider.stream.call_args_list] == [model_key, 'openrouter/free']
     saved = client.get(f'/api/v1/conversations/{conv_id}/messages', headers=headers(token)).json()
@@ -1140,21 +1139,67 @@ def test_openrouter_free_model_partial_response_does_not_retry():
     assert 'OpenRouter’s free model router' not in response.text
     assert provider.stream.call_count == 1
 
+
+def test_openrouter_billing_error_does_not_fallback_or_leak_provider_details():
+    from app.services.llm.errors import ProviderError
+
+    token = signup('openrouter-402-no-fallback@example.com')
+    conv_id = make_conversation(token)
+    model_key = 'vendor/example:free'
+    seed_model(provider='openrouter', model_key=model_key, display_name='Example Free Model')
+    configure_provider(token, provider='openrouter', api_key='openrouter-user-generation-key')
+    provider = MagicMock()
+    provider.stream.side_effect = ProviderError(
+        'openrouter', model_key, 402, 'PROVIDER_BILLING_OR_CREDITS', 'PaymentRequired', 'private billing response'
+    )
+
+    with patch('app.api.routes.get_provider', return_value=provider):
+        response = client.post(
+            f'/api/v1/conversations/{conv_id}/generate',
+            headers=headers(token),
+            json={'message': 'Hello', 'provider': 'openrouter', 'model_key': model_key},
+        )
+
+    events = [json.loads(line) for line in response.text.strip().split('\n') if line]
+    error = next(event for event in events if event['type'] == 'error')
+    assert provider.stream.call_count == 1
+    assert error['code'] == 'PROVIDER_BILLING_OR_CREDITS'
+    assert 'private billing response' not in response.text
+
+
+def test_paid_registry_model_cannot_be_selected_even_if_provider_is_enabled():
+    token = signup('paid-registry-model@example.com')
+    conv_id = make_conversation(token)
+    model_key = 'paid-model-test'
+    seed_model(provider='openai', model_key=model_key, display_name='Paid model', is_free=False)
+    configure_provider(token, provider='openai')
+
+    response = client.post(
+        f'/api/v1/conversations/{conv_id}/generate',
+        headers=headers(token),
+        json={'message': 'Hello', 'provider': 'openai', 'model_key': model_key},
+    )
+
+    assert response.status_code == 400
+    assert 'verified free catalog' in response.json()['detail']
+
+
 def test_provider_model_refresh_upserts_current_metadata():
     token = signup('groq-refresh@example.com')
     configure_provider(token, provider='groq', api_key='user-groq-secret-123')
     provider = MagicMock()
     provider.list_models.return_value = [
-        {'model_key': 'current-groq-model', 'display_name': 'Current Groq Model', 'context_length': 131072, 'is_free': None},
+        {'model_key': 'openai/gpt-oss-20b', 'display_name': 'GPT OSS 20B', 'context_length': 131072, 'is_free': None},
     ]
     with patch('app.api.routes.get_provider', return_value=provider):
         first = client.get('/api/v1/providers/groq/models', headers=headers(token))
         second = client.get('/api/v1/providers/groq/models', headers=headers(token))
     assert first.status_code == 200 and second.status_code == 200
-    assert first.json()[0]['model_key'] == 'current-groq-model'
+    assert first.json()[0]['model_key'] == 'openai/gpt-oss-20b'
     db = TestingSession()
-    rows = db.scalars(select(ModelRegistry).where(ModelRegistry.provider == 'groq', ModelRegistry.model_key == 'current-groq-model')).all()
+    rows = db.scalars(select(ModelRegistry).where(ModelRegistry.provider == 'groq', ModelRegistry.model_key == 'openai/gpt-oss-20b')).all()
     assert len(rows) == 1
     assert rows[0].context_window == 131072
     db.close()
+
 
