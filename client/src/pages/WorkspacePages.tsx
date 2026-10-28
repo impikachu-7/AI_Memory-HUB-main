@@ -650,8 +650,17 @@ function ProvidersPage() {
       if (configuredList.some((item) => item.provider === providerId)) await api.providers.update(providerId, { api_key: key, is_enabled: true });
       else await api.providers.configure(providerId, key, true);
       setKeyDrafts((current) => ({ ...current, [providerId]: "" }));
-      toast.success(`${providerId} key saved securely`);
       loadProviders();
+      // A rotated key can have different model access and free-tier limits.
+      // Synchronize its live catalog now so the model selector doesn't keep
+      // presenting entries discovered with the previous credential.
+      try {
+        const result = await api.providers.listModels(providerId);
+        toast.success(`${providerId} key saved · ${result.discovered_count} discovered, ${result.eligible_count} available`);
+      } catch (refreshError: any) {
+        toast.success(`${providerId} key saved securely`);
+        toast.error(`${providerId} models could not be refreshed: ${refreshError?.message || "check the provider key and try Refresh Models"}`);
+      }
     } catch (e: any) { toast.error(e.message || "Failed to save provider key"); }
   };
 
