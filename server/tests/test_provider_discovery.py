@@ -151,6 +151,7 @@ def test_openrouter_client_uses_bounded_timeout():
     with patch("openai.OpenAI", return_value=client) as openai_client:
         _client("user-openrouter-key")
     assert openai_client.call_args.kwargs["timeout"] == 45.0
+    assert openai_client.call_args.kwargs["max_retries"] == 0
 
 
 def test_groq_discovery_uses_live_catalog():
