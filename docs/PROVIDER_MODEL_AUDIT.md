@@ -36,4 +36,3 @@ Provider discovery stores the provider's exact model ID. The same ID is checked 
 ## Verification status
 
 Automated provider discovery and chat-generation tests use mocks and do not spend credits. Live generation for every provider/model remains NOT TESTED without user BYOK credentials. Free-tier availability can also depend on geography, account eligibility, quotas and current provider terms. Provider Settings connection/model refresh remains the user's live check; an API model list cannot prove a successful inference call.
-
