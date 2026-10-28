@@ -12,8 +12,30 @@ _BASE_URL = "https://integrate.api.nvidia.com/v1"
 _REQUEST_TIMEOUT_SECONDS = 90.0
 _NON_CHAT_MODEL_MARKERS = (
     "embed", "rerank", "whisper", "speech", "transcrib", "tts", "flux",
-    "image-generation", "video-generation", "ising-calibration",
+    "image-generation", "video-generation", "ising-calibration", "content-safety",
 )
+
+# NVIDIA's OpenAI-compatible /v1/models endpoint reports availability and IDs,
+# but usually omits the separate API Catalog "Free Endpoint" field. Keep this
+# small evidence-backed set in sync with NVIDIA's public catalog. A model must
+# still be present in the user's authenticated /models response before it is
+# offered. Reviewed 2026-10-29 against the individual NVIDIA model pages.
+_NVIDIA_FREE_CHAT_MODEL_IDS = frozenset({
+    "deepseek-ai/deepseek-v4.1-flash",
+    "google/diffusiongemma-26b-a4b-it",
+    "google/gemma-4-31b-it",
+    "meta/muse-glimmer-30b",
+    "minimaxai/minimax-m3.1-flash",
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+    "nvidia/nemotron-3.5-bolt-e4b",
+    "nvidia/nemotron-3-ultra-550b-a55b",
+    "nvidia/nemotron-3.5-lightning-30b-a3b",
+    "nvidia/nemotron-3.5-super-vl-120b-a12b",
+    "openai/gpt-oss-20b",
+    "poolside/laguna-xs-2.1",
+    "stepfun-ai/step-5-preview",
+    "z-ai/glm-5-3-flash",
+})
 
 
 def _supports_chat_completions(model_id: str, metadata: dict) -> bool:
@@ -131,9 +153,12 @@ class NvidiaProvider(LLMProvider):
                     continue
                 if not _supports_chat_completions(model_key, raw):
                     continue
+                free_status = _free_status(raw)
+                if free_status is None and model_key in _NVIDIA_FREE_CHAT_MODEL_IDS:
+                    free_status = True
                 result.append({"model_key": model_key, "display_name": raw.get("name") or model_key,
                                "is_local": False, "context_length": raw.get("context_length"),
-                               "is_free": _free_status(raw)})
+                               "is_free": free_status})
             return result
         except Exception as exc:
             _raise(exc)

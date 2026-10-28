@@ -1,6 +1,7 @@
 """Provider registration and current model catalog metadata tests."""
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+import pytest
 
 from app.services.llm.registry import get_provider
 
@@ -33,10 +34,54 @@ def test_nvidia_catalog_accepts_ids_without_optional_modality_fields():
     assert models[0]["is_free"] is True
 
 
+def test_nvidia_catalog_uses_verified_free_catalog_id_when_pricing_metadata_is_absent():
+    from app.services.llm.nvidia_provider import NvidiaProvider
+    client = MagicMock()
+    client.models.list.return_value.data = [_sdk_model("nvidia/nemotron-3-ultra-550b-a55b")]
+    with patch("openai.OpenAI", return_value=client):
+        models = NvidiaProvider().list_models("user-nvidia-key")
+    assert len(models) == 1
+    assert models[0]["model_key"] == "nvidia/nemotron-3-ultra-550b-a55b"
+    assert models[0]["is_free"] is True
+
+
+def test_nvidia_free_catalog_discovery_keeps_all_verified_chat_ids_and_excludes_specialized_models():
+    from app.services.llm.nvidia_provider import NvidiaProvider
+    client = MagicMock()
+    ids = [
+        "nvidia/nemotron-3.5-bolt-e4b",
+        "nvidia/nemotron-3.5-super-vl-120b-a12b",
+        "nvidia/nemotron-3.5-lightning-30b-a3b",
+        "google/gemma-4-31b-it",
+        "nvidia/nemotron-3.5-embed-1b",
+        "nvidia/nemotron-3.5-content-safety",
+    ]
+    client.models.list.return_value.data = [_sdk_model(model_id) for model_id in ids]
+    with patch("openai.OpenAI", return_value=client):
+        models = NvidiaProvider().list_models("user-nvidia-key")
+    assert [model["model_key"] for model in models] == ids[:4]
+    assert all(model["is_free"] is True for model in models)
+
+
 def test_free_model_policy_rejects_unknown_price_evidence():
     from app.services.llm.free_model_policy import verified_catalog
     assert verified_catalog("nvidia", [{"model_key": "google/gemma-4-31b-it", "is_free": None}]) == []
+    assert [m["model_key"] for m in verified_catalog("nvidia", [
+        {"model_key": "nvidia/nemotron-3-ultra-550b-a55b", "is_free": True},
+    ])] == ["nvidia/nemotron-3-ultra-550b-a55b"]
     assert verified_catalog("openrouter", [{"model_key": "vendor/model", "is_free": False}]) == []
+
+
+def test_openrouter_rate_limit_preserves_bounded_retry_after_only():
+    from app.services.llm.errors import provider_error
+    response = SimpleNamespace(headers={"Retry-After": "37"})
+    exc = SimpleNamespace(status_code=429, response=response)
+    error = provider_error(exc, "openrouter", "openrouter/free")
+    assert error.provider_status == 429
+    assert error.code == "RATE_LIMITED"
+    assert error.retry_after_seconds == 37
+    no_hint = provider_error(SimpleNamespace(status_code=429), "openrouter")
+    assert no_hint.retry_after_seconds is None
 
 
 def test_free_model_policy_intersects_groq_catalog_with_free_chat_allowlist():
@@ -67,6 +112,33 @@ def test_nvidia_test_connection_checks_models_endpoint():
     with patch("openai.OpenAI", return_value=client):
         NvidiaProvider().validate_credentials("user-nvidia-key")
     client.models.list.assert_called_once_with()
+
+
+@pytest.mark.parametrize("status_code", [401, 403, 429, 500])
+def test_nvidia_discovery_preserves_failure_status_without_upstream_body(status_code):
+    from app.services.llm.errors import ProviderError
+    from app.services.llm.nvidia_provider import NvidiaProvider
+
+    client = MagicMock()
+    upstream = RuntimeError("private upstream response includes sensitive text")
+    upstream.status_code = status_code
+    client.models.list.side_effect = upstream
+    with patch("openai.OpenAI", return_value=client), pytest.raises(ProviderError) as error:
+        NvidiaProvider().list_models("user-nvidia-key")
+    assert error.value.provider_status == status_code
+    assert "sensitive" not in str(error.value.detail)
+
+
+def test_nvidia_malformed_catalog_response_is_not_reported_as_empty_success():
+    from app.services.llm.errors import ProviderError
+    from app.services.llm.nvidia_provider import NvidiaProvider
+
+    client = MagicMock()
+    client.models.list.side_effect = ValueError("malformed JSON with private content")
+    with patch("openai.OpenAI", return_value=client), pytest.raises(ProviderError) as error:
+        NvidiaProvider().list_models("user-nvidia-key")
+    assert error.value.provider_status == 502
+    assert "private content" not in str(error.value.detail)
 
 
 def test_nvidia_client_uses_bounded_timeout_without_retries():

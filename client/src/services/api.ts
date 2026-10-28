@@ -68,6 +68,7 @@ export interface GenerateRequest {
   message: string;
   provider: string;
   model_key: string;
+  allow_free_fallback?: boolean;
 }
 
 export interface ProviderRead {
@@ -83,6 +84,19 @@ export interface ProviderModelRead {
   context_length?: number;
   is_local: boolean;
   is_free?: boolean | null;
+}
+
+export interface ProviderModelRefreshRead {
+  provider: string;
+  discovered_count: number;
+  eligible_count: number;
+  registered_count: number;
+  created_count: number;
+  updated_count: number;
+  deactivated_count: number;
+  excluded_count: number;
+  excluded_reasons: Record<string, number>;
+  models: ProviderModelRead[];
 }
 
 export interface ModelRead {
@@ -233,7 +247,7 @@ export const api = {
     remove: (provider: string) => request<void>(`/providers/${provider}`, { method: "DELETE" }),
     removeCredentials: (provider: string) => request<void>(`/providers/${provider}/credentials`, { method: "DELETE" }),
     test: (provider: string) => request<{ provider: string; status: string }>(`/providers/${provider}/test`, { method: "POST" }),
-    listModels: (provider: string) => request<ProviderModelRead[]>(`/providers/${provider}/models`),
+    listModels: (provider: string) => request<ProviderModelRefreshRead>(`/providers/${provider}/models`),
     registerLocalModels: (models: Array<{ model_key: string; display_name?: string }>) =>
       request<ModelRead[]>("/providers/ollama/local-models", { method: "POST", body: JSON.stringify(models) }),
   },

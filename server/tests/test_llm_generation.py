@@ -873,11 +873,14 @@ def test_list_provider_models_calls_provider_and_returns_results():
 
     assert r.status_code == 200
     data = r.json()
-    assert len(data) == 2
-    assert data[0]['model_key'] == 'openai/gpt-oss-20b'
+    assert len(data['models']) == 2
+    assert data['models'][0]['model_key'] == 'openai/gpt-oss-20b'
+    assert data['discovered_count'] == 2
+    assert data['eligible_count'] == 2
     # Verify the API key was never returned
-    assert all('api_key' not in item for item in data)
-    assert all('key' not in str(item).lower() or 'model_key' in item for item in data)
+    assert 'api_key' not in data
+    assert 'user-groq-secret' not in str(data)
+    assert all('key' not in str(item).lower() or 'model_key' in item for item in data['models'])
 
 
 def test_list_provider_models_requires_own_config():
@@ -1077,7 +1080,7 @@ def test_nvidia_generation_404_uses_safe_model_unavailable_message():
     assert 'provider detail is private' not in response.text
 
 
-def test_openrouter_free_model_unavailable_falls_back_to_free_router():
+def test_openrouter_free_model_unavailable_does_not_switch_without_explicit_opt_in():
     from app.services.llm.errors import ProviderError
 
     token = signup('openrouter-free-fallback@example.com')
@@ -1089,10 +1092,8 @@ def test_openrouter_free_model_unavailable_falls_back_to_free_router():
     provider = MagicMock()
 
     def stream(_messages, _api_key, selected_model, _max_output_tokens=None):
-        if selected_model == model_key:
-            raise ProviderError('openrouter', selected_model, 404, 'MODEL_NOT_FOUND', 'NotFoundError')
-        assert selected_model == 'openrouter/free'
-        return iter(['Free router response'])
+        assert selected_model == model_key
+        raise ProviderError('openrouter', selected_model, 404, 'MODEL_NOT_FOUND', 'NotFoundError')
 
     provider.stream.side_effect = stream
     with patch('app.api.routes.get_provider', return_value=provider):
@@ -1102,13 +1103,38 @@ def test_openrouter_free_model_unavailable_falls_back_to_free_router():
             json={'message': 'Hello', 'provider': 'openrouter', 'model_key': model_key},
         )
 
-    assert response.status_code == 200
     events = [json.loads(line) for line in response.text.strip().split('\n') if line]
-    assert any(event.get('type') == 'status' and 'free model router' in event.get('message', '') for event in events)
-    assert 'Free router response' in response.text
+    error = next(event for event in events if event['type'] == 'error')
+    assert error['code'] == 'MODEL_NOT_FOUND'
+    assert provider.stream.call_count == 1
+
+
+def test_openrouter_free_fallback_works_only_when_explicitly_allowed():
+    from app.services.llm.errors import ProviderError
+    token = signup('openrouter-explicit-fallback@example.com')
+    conv_id = make_conversation(token)
+    model_key = 'vendor/unavailable-model:free'
+    seed_model(provider='openrouter', model_key=model_key, display_name='Free model')
+    seed_model(provider='openrouter', model_key='openrouter/free', display_name='Free Models Router')
+    configure_provider(token, provider='openrouter', api_key='openrouter-user-generation-key')
+    provider = MagicMock()
+
+    def stream(_messages, _api_key, selected_model, _max_output_tokens=None):
+        if selected_model == model_key:
+            raise ProviderError('openrouter', selected_model, 404, 'MODEL_NOT_FOUND', 'NotFoundError')
+        assert selected_model == 'openrouter/free'
+        return iter(['Allowed free fallback'])
+
+    provider.stream.side_effect = stream
+    with patch('app.api.routes.get_provider', return_value=provider):
+        response = client.post(
+            f'/api/v1/conversations/{conv_id}/generate',
+            headers=headers(token),
+            json={'message': 'Hello', 'provider': 'openrouter', 'model_key': model_key, 'allow_free_fallback': True},
+        )
+    assert response.status_code == 200
+    assert 'Allowed free fallback' in response.text
     assert [call.args[2] for call in provider.stream.call_args_list] == [model_key, 'openrouter/free']
-    saved = client.get(f'/api/v1/conversations/{conv_id}/messages', headers=headers(token)).json()
-    assert any(message['role'] == 'assistant' and message['model_id'] == 'openrouter/free' for message in saved)
 
 
 def test_openrouter_free_model_partial_response_does_not_retry():
@@ -1195,10 +1221,53 @@ def test_provider_model_refresh_upserts_current_metadata():
         first = client.get('/api/v1/providers/groq/models', headers=headers(token))
         second = client.get('/api/v1/providers/groq/models', headers=headers(token))
     assert first.status_code == 200 and second.status_code == 200
-    assert first.json()[0]['model_key'] == 'openai/gpt-oss-20b'
+    assert first.json()['models'][0]['model_key'] == 'openai/gpt-oss-20b'
+    assert first.json()['discovered_count'] == first.json()['eligible_count'] == 1
+    assert first.json()['registered_count'] == 1
     db = TestingSession()
     rows = db.scalars(select(ModelRegistry).where(ModelRegistry.provider == 'groq', ModelRegistry.model_key == 'openai/gpt-oss-20b')).all()
     assert len(rows) == 1
     assert rows[0].context_window == 131072
     db.close()
+
+
+def test_failed_provider_refresh_keeps_existing_models_active():
+    from app.services.llm.errors import ProviderError
+    token = signup('failed-refresh-preserves-registry@example.com')
+    configure_provider(token, provider='nvidia', api_key='user-nvidia-secret-123')
+    model_key = 'nvidia/nemotron-3-ultra-550b-a55b'
+    seed_model(provider='nvidia', model_key=model_key, display_name='Nemotron Ultra')
+    provider = MagicMock()
+    provider.list_models.side_effect = ProviderError('nvidia', None, 401, 'PROVIDER_AUTH_ERROR', 'AuthenticationError', 'private')
+    with patch('app.api.routes.get_provider', return_value=provider):
+        response = client.get('/api/v1/providers/nvidia/models', headers=headers(token))
+    assert response.status_code == 401
+    assert 'private' not in response.text
+    db = TestingSession()
+    row = db.scalar(select(ModelRegistry).where(ModelRegistry.provider == 'nvidia', ModelRegistry.model_key == model_key))
+    assert row is not None and row.is_active is True
+    db.close()
+
+
+def test_openrouter_429_includes_retry_hint_and_never_retries_route():
+    from app.services.llm.errors import ProviderError
+    token = signup('openrouter-429-no-retry@example.com')
+    conv_id = make_conversation(token)
+    model_key = 'openrouter/free'
+    seed_model(provider='openrouter', model_key=model_key, display_name='Free Models Router')
+    configure_provider(token, provider='openrouter', api_key='openrouter-user-generation-key')
+    provider = MagicMock()
+    provider.stream.side_effect = ProviderError('openrouter', model_key, 429, 'RATE_LIMITED', 'RateLimitError', retry_after_seconds=41)
+    with patch('app.api.routes.get_provider', return_value=provider):
+        response = client.post(
+            f'/api/v1/conversations/{conv_id}/generate',
+            headers=headers(token),
+            json={'message': 'Hello', 'provider': 'openrouter', 'model_key': model_key},
+        )
+    events = [json.loads(line) for line in response.text.strip().split('\n') if line]
+    error = next(event for event in events if event['type'] == 'error')
+    assert error['code'] == 'RATE_LIMITED'
+    assert error['retry_after_seconds'] == 41
+    assert 'No retry or model switch' in error['detail']
+    assert provider.stream.call_count == 1
 

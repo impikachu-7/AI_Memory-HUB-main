@@ -252,7 +252,6 @@ function ChatPage() {
       provider: selectedModel.provider,
       model_key: selectedModel.model_key,
     };
-
     const generationConversationId = activeConvId;
     const generationModel = selectedModel;
     let streamedResponse = "";
@@ -280,10 +279,12 @@ function ChatPage() {
           model_id: generationModel.model_key,
           created_at: new Date().toISOString(),
         };
-        setMessagesList((prev) => prev.some((msg) => msg.id === messageId) ? prev : [...prev, assistantMessage]);
-        void api.conversations.listMessages(generationConversationId).then((msgs) => {
-          if (activeConvIdRef.current === generationConversationId) setMessagesList(msgs);
-        }).catch(() => undefined);
+        if (activeConvIdRef.current === generationConversationId) {
+          setMessagesList((prev) => prev.some((msg) => msg.id === messageId) ? prev : [...prev, assistantMessage]);
+          void api.conversations.listMessages(generationConversationId).then((msgs) => {
+            if (activeConvIdRef.current === generationConversationId) setMessagesList(msgs);
+          }).catch(() => undefined);
+        }
       },
       (err) => {
         if (activeConvIdRef.current !== generationConversationId) return;
@@ -655,7 +656,23 @@ function ProvidersPage() {
   };
 
   const handleRefreshModels = async (providerId: string) => {
-    try { const models = await api.providers.listModels(providerId); toast.success(`${models.length} ${providerId} models refreshed`); }
+    try {
+      const result = await api.providers.listModels(providerId);
+      const exclusions = Object.entries(result.excluded_reasons)
+        .map(([reason, count]) => `${count} ${reason === "free_status_unknown" ? "without verified free status" : "not verified free"}`)
+        .join(", ");
+      if (result.eligible_count === 0) {
+        const unknown = result.excluded_reasons.free_status_unknown ?? 0;
+        const reason = result.discovered_count === 0
+          ? "The provider returned no chat-compatible models."
+          : unknown > 0
+            ? `${unknown} model${unknown === 1 ? " has" : "s have"} no verified free-endpoint status.`
+            : "Discovered models are not verified as free chat endpoints.";
+        toast.error(`${providerId}: ${result.discovered_count} discovered, 0 eligible/registered. ${reason}${exclusions ? ` Excluded: ${exclusions}.` : ""}`);
+        return;
+      }
+      toast.success(`${providerId}: ${result.discovered_count} discovered, ${result.eligible_count} eligible, ${result.registered_count} registered, ${result.excluded_count} excluded${exclusions ? ` (${exclusions})` : ""}`);
+    }
     catch (e: any) { toast.error(e.message || "Failed to refresh provider models"); }
   };
 
