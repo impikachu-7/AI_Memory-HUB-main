@@ -168,6 +168,34 @@ def test_groq_discovery_uses_live_catalog():
     assert [model["model_key"] for model in models] == ["openai/gpt-oss-20b"]
 
 
+def test_anthropic_discovery_uses_live_models_and_excludes_retired_models():
+    from app.services.llm.anthropic_provider import AnthropicProvider
+    client = MagicMock()
+    client.models.list.return_value.data = [
+        SimpleNamespace(id="claude-sonnet-5", display_name="Claude Sonnet 5", max_input_tokens=100000, lifecycle="active"),
+        SimpleNamespace(id="claude-3-5-haiku-20241022", display_name="Retired Haiku", lifecycle="retired"),
+    ]
+    with patch("anthropic.Anthropic", return_value=client) as anthropic_client:
+        models = AnthropicProvider().list_models("user-anthropic-key")
+
+    assert [model["model_key"] for model in models] == ["claude-sonnet-5"]
+    assert models[0]["context_length"] == 100000
+    client.models.list.assert_called_once_with(limit=1000)
+    anthropic_client.assert_called_once_with(api_key="user-anthropic-key", timeout=45.0, max_retries=0)
+
+
+def test_openai_compatible_clients_use_bounded_timeout_without_retries():
+    from app.services.llm.openai_provider import _client as openai_client
+    from app.services.llm.deepseek_provider import _client as deepseek_client
+    from app.services.llm.groq_provider import _client as groq_client
+
+    for create_client in (openai_client, deepseek_client, groq_client):
+        with patch("openai.OpenAI", return_value=MagicMock()) as sdk_client:
+            create_client("user-provider-key")
+        assert sdk_client.call_args.kwargs["timeout"] == 45.0
+        assert sdk_client.call_args.kwargs["max_retries"] == 0
+
+
 def test_openai_discovery_excludes_non_chat_models():
     from app.services.llm.openai_provider import OpenAIProvider
     client = MagicMock()
