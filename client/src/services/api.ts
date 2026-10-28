@@ -314,7 +314,9 @@ export const api = {
                     GENERATION_LIMIT_REACHED: "Generation limit reached.",
                     PROVIDER_ERROR: "The provider could not complete this request.",
                   };
-                  const error = new Error(event.detail || details[event.code] || "Error during generation");
+                  const message = event.detail || details[event.code] || "Error during generation";
+                  const source = [event.provider, event.model_key].filter(Boolean).join(" · ");
+                  const error = new Error(source ? `${message} (${source})` : message);
                   (error as Error & { code?: string }).code = event.code;
                   throw error;
                 }
