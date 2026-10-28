@@ -106,13 +106,15 @@ def test_openrouter_discovery_marks_current_zero_pricing_and_includes_router():
         _sdk_model("vendor/free-model", pricing={"prompt": "0", "completion": "0.0"}, architecture={"input_modalities": ["text"], "output_modalities": ["text"], "modality": "text->text"}),
         _sdk_model("vendor/paid-model", pricing={"prompt": "0.1", "completion": "0.2"}, architecture={"input_modalities": ["text"], "output_modalities": ["text"], "modality": "text->text"}),
         _sdk_model("vendor/image-model", pricing={"prompt": "0", "completion": "0"}, architecture={"input_modalities": ["text"], "output_modalities": ["image"], "modality": "text->image"}),
+        _sdk_model("nvidia/nemotron-3.5-content-safety:free", name="Nemotron 3.5 Content Safety (free)", description="Moderates both inputs and responses; returns a safety classification.", pricing={"prompt": "0", "completion": "0"}, architecture={"input_modalities": ["text", "image"], "output_modalities": ["text"], "modality": "text+image->text"}),
     ]
     with patch("openai.OpenAI", return_value=client):
         models = OpenRouterProvider().list_models("user-openrouter-key")
     by_id = {model["model_key"]: model for model in models}
     assert by_id["vendor/free-model"]["is_free"] is True
-    assert by_id["vendor/paid-model"]["is_free"] is False
+    assert "vendor/paid-model" not in by_id
     assert "vendor/image-model" not in by_id
+    assert "nvidia/nemotron-3.5-content-safety:free" not in by_id
     assert by_id["openrouter/free"]["is_free"] is True
 
 
@@ -125,7 +127,15 @@ def test_openrouter_does_not_offer_free_router_without_a_free_chat_model():
     ]
     with patch("openai.OpenAI", return_value=client):
         models = OpenRouterProvider().list_models("user-openrouter-key")
-    assert [model["model_key"] for model in models] == ["vendor/paid-model"]
+    assert models == []
+
+
+def test_openrouter_client_uses_bounded_timeout():
+    from app.services.llm.openrouter_provider import _client
+    client = MagicMock()
+    with patch("openai.OpenAI", return_value=client) as openai_client:
+        _client("user-openrouter-key")
+    assert openai_client.call_args.kwargs["timeout"] == 45.0
 
 
 def test_groq_discovery_uses_live_catalog():

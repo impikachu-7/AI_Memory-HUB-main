@@ -17,10 +17,29 @@ _DEFAULT_HEADERS = {
     "HTTP-Referer": "https://ai-memory-hub.app",
     "X-Title": "AI Memory Hub",
 }
+_NON_CHAT_MODEL_MARKERS = (
+    "content-safety", "safety-guard", "guardrail", "moderation", "classifier",
+    "embedding", "embed-", "rerank", "whisper", "transcrib", "text-to-speech",
+    "image-generation", "video-generation",
+)
 
 
-def _supports_text_chat(metadata: dict) -> bool:
-    """Keep catalogs for embeddings, speech, and image generation out of chat."""
+def _supports_text_chat(model_id: str, metadata: dict) -> bool:
+    """Keep specialized safety/task models out of the general chat picker."""
+    lowered_id = model_id.lower()
+    if any(marker in lowered_id for marker in _NON_CHAT_MODEL_MARKERS):
+        return False
+    name = str(metadata.get("name") or "").lower()
+    description = str(metadata.get("description") or "").lower()
+    if any(marker in name for marker in _NON_CHAT_MODEL_MARKERS):
+        return False
+    if any(marker in description for marker in (
+        "moderates both inputs", "safety classification", "content moderation",
+        "safety classifier", "embedding model", "reranking model",
+        "speech recognition model", "text-to-speech model",
+    )):
+        return False
+
     architecture = metadata.get("architecture")
     if not isinstance(architecture, dict):
         # Older OpenRouter responses may omit architecture; preserve the model
@@ -46,6 +65,7 @@ def _client(api_key: str):
             api_key=api_key,
             base_url=_BASE_URL,
             default_headers=_DEFAULT_HEADERS,
+            timeout=45.0,
         )
     except ImportError as exc:
         raise HTTPException(503, "openai SDK is not installed") from exc
@@ -76,7 +96,7 @@ class OpenRouterProvider(LLMProvider):
             discovered = []
             for model in models.data:
                 metadata = model.model_dump() if hasattr(model, "model_dump") else {}
-                if not _supports_text_chat(metadata):
+                if not _supports_text_chat(model.id, metadata):
                     continue
                 pricing = metadata.get("pricing") or getattr(model, "pricing", None) or {}
                 if not isinstance(pricing, dict):
