@@ -1,4 +1,5 @@
 from fastapi.responses import RedirectResponse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, date, datetime, timedelta
 import hmac
 import json
@@ -778,55 +779,62 @@ def list_models(db: Session = Depends(get_db), user: User = Depends(current_user
     if not configs:
         return []
 
-    discovered: list[ModelRegistry] = []
-    for config in configs:
-        if config.provider == 'ollama':
-            discovered.extend(db.scalars(
-                select(ModelRegistry).where(
-                    ModelRegistry.provider == 'ollama',
-                    ModelRegistry.is_active.is_(True),
+    discovered: list[ModelRegistry] = list(db.scalars(
+        select(ModelRegistry).where(
+            ModelRegistry.provider == 'ollama',
+            ModelRegistry.is_active.is_(True),
+        )
+    ).all()) if any(config.provider == 'ollama' for config in configs) else []
+
+    remote_configs = [config for config in configs if config.provider != 'ollama']
+
+    def fetch_catalog(config: ProviderConfiguration):
+        api_key = decrypt_api_key(config.encrypted_api_key) if config.encrypted_api_key else None
+        return get_provider(config.provider).list_models(api_key)
+
+    # Refresh providers concurrently so a slow catalog does not multiply page
+    # load latency by the number of configured providers.
+    with ThreadPoolExecutor(max_workers=min(4, len(remote_configs) or 1)) as executor:
+        futures = {executor.submit(fetch_catalog, config): config for config in remote_configs}
+        for future in as_completed(futures):
+            config = futures[future]
+            try:
+                raw_models = future.result()
+            except Exception as exc:
+                # Stale cached IDs should not be offered when this user's live
+                # catalog could not be verified.
+                log.warning(
+                    "Model discovery failed provider=%s error_type=%s",
+                    config.provider,
+                    type(exc).__name__,
                 )
-            ).all())
-            continue
-
-        try:
-            api_key = decrypt_api_key(config.encrypted_api_key) if config.encrypted_api_key else None
-            raw_models = get_provider(config.provider).list_models(api_key)
-        except Exception as exc:
-            # A provider outage should not hide models from other configured
-            # providers, and cached/stale rows should not be offered as live.
-            log.warning(
-                "Model discovery failed provider=%s error_type=%s",
-                config.provider,
-                type(exc).__name__,
-            )
-            continue
-
-        db.query(ModelRegistry).filter(
-            ModelRegistry.provider == config.provider
-        ).update({ModelRegistry.is_active: False}, synchronize_session=False)
-        for item in raw_models:
-            model_key = str(item.get('model_key') or '').strip()
-            if not model_key:
                 continue
-            entry = db.scalar(select(ModelRegistry).where(
-                ModelRegistry.provider == config.provider,
-                ModelRegistry.model_key == model_key,
-            ))
-            if entry is None:
-                entry = ModelRegistry(
-                    provider=config.provider,
-                    model_key=model_key,
-                    display_name=str(item.get('display_name') or model_key)[:150],
-                    is_local=False,
-                    is_active=True,
-                )
-                db.add(entry)
-            entry.display_name = str(item.get('display_name') or model_key)[:150]
-            entry.context_window = item.get('context_length')
-            entry.is_free = item.get('is_free')
-            entry.is_active = True
-            discovered.append(entry)
+
+            db.query(ModelRegistry).filter(
+                ModelRegistry.provider == config.provider
+            ).update({ModelRegistry.is_active: False}, synchronize_session=False)
+            for item in raw_models:
+                model_key = str(item.get('model_key') or '').strip()
+                if not model_key:
+                    continue
+                entry = db.scalar(select(ModelRegistry).where(
+                    ModelRegistry.provider == config.provider,
+                    ModelRegistry.model_key == model_key,
+                ))
+                if entry is None:
+                    entry = ModelRegistry(
+                        provider=config.provider,
+                        model_key=model_key,
+                        display_name=str(item.get('display_name') or model_key)[:150],
+                        is_local=False,
+                        is_active=True,
+                    )
+                    db.add(entry)
+                entry.display_name = str(item.get('display_name') or model_key)[:150]
+                entry.context_window = item.get('context_length')
+                entry.is_free = item.get('is_free')
+                entry.is_active = True
+                discovered.append(entry)
 
     db.commit()
     return discovered
