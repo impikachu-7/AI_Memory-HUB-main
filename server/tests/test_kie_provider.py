@@ -63,4 +63,3 @@ def test_kie_generation_uses_user_supplied_credential():
         result = KieProvider().generate([{"role": "user", "content": "Hi"}], "user-owned-kie-secret", "gpt-5-5")
     assert result == "Hello"
     assert post.call_args.kwargs["headers"]["Authorization"] == "Bearer user-owned-kie-secret"
-
