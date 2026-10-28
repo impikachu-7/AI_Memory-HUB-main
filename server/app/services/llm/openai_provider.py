@@ -23,7 +23,7 @@ def _supports_chat_completions(model_id: str) -> bool:
 def _client(api_key: str):
     try:
         import openai
-        return openai.OpenAI(api_key=api_key)
+        return openai.OpenAI(api_key=api_key, timeout=45.0, max_retries=0)
     except ImportError as exc:
         raise HTTPException(503, "OpenAI SDK is not installed") from exc
 
@@ -51,7 +51,7 @@ class OpenAIProvider(LLMProvider):
         try:
             models = _client(api_key).models.list()
             return [
-                {"model_key": m.id, "display_name": m.id, "is_local": False}
+                {"model_key": m.id, "display_name": m.id, "is_local": False, "is_free": False}
                 for m in models.data
                 if "gpt" in m.id or "o1" in m.id or "o3" in m.id or "o4" in m.id
                 if _supports_chat_completions(m.id)

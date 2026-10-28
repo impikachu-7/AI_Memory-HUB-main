@@ -111,15 +111,15 @@ def get_user_id(email: str) -> str:
     return me.json()['id']
 
 
-def seed_model(provider='openai', model_key='gpt-4o', display_name='GPT-4o', is_local=False):
+def seed_model(provider='openai', model_key='gpt-4o', display_name='GPT-4o', is_local=False, is_free=True):
     db = TestingSession()
-    existing = db.scalar(select(ModelRegistry).where(ModelRegistry.model_key == model_key))
+    existing = db.scalar(select(ModelRegistry).where(ModelRegistry.provider == provider, ModelRegistry.model_key == model_key))
     if existing:
         db.close()
         return existing.id
     entry = ModelRegistry(
         id=str(uuid.uuid4()), provider=provider, model_key=model_key,
-        display_name=display_name, is_local=is_local, is_active=True,
+        display_name=display_name, is_local=is_local, is_active=True, is_free=is_free,
     )
     db.add(entry); db.commit()
     model_id = entry.id
@@ -128,11 +128,37 @@ def seed_model(provider='openai', model_key='gpt-4o', display_name='GPT-4o', is_
 
 
 def configure_provider(token, provider='openai', api_key='sk-test-key-abcdefgh', is_enabled=True):
-    return client.post(
+    response = client.post(
         '/api/v1/providers',
         headers=headers(token),
         json={'provider': provider, 'api_key': api_key, 'is_enabled': is_enabled},
     )
+    # This test helper installs an explicitly mocked, user-scoped catalog for
+    # generation tests. Provider discovery tests exercise verified_catalog and
+    # the real refresh path separately; no tests call a live provider API.
+    if response.status_code in (200, 201):
+        from datetime import datetime, timezone
+        from app.api import routes
+        user_response = client.get('/api/v1/auth/me', headers=headers(token))
+        user_id = user_response.json()['id']
+        db = TestingSession()
+        config = db.scalar(select(ProviderConfiguration).where(
+            ProviderConfiguration.user_id == user_id,
+            ProviderConfiguration.provider == provider,
+        ))
+        rows = db.scalars(select(ModelRegistry).where(
+            ModelRegistry.provider == provider,
+            ModelRegistry.is_active.is_(True),
+        )).all()
+        if config:
+            version = config.updated_at.isoformat() if config.updated_at else str(config.id)
+            routes._MODEL_CATALOG_CACHE[(user_id, provider, version)] = (
+                __import__('time').monotonic(),
+                [{'model_key': row.model_key, 'display_name': row.display_name,
+                  'is_free': True, 'is_local': row.is_local} for row in rows],
+            )
+        db.close()
+    return response
 
 
 def make_conversation(token, title='Test chat'):
@@ -305,6 +331,7 @@ def test_generate_saves_user_and_assistant_messages():
     lines = [line for line in r.text.strip().split('\n') if line]
     events = [json.loads(line) for line in lines]
     chunk_types = [e['type'] for e in events]
+    assert events[0]['type'] == 'status'
     assert 'chunk' in chunk_types
     assert 'done' in chunk_types
 
@@ -519,7 +546,7 @@ def test_partial_failure_preserves_previous_assistant_and_does_not_persist_incom
         )
 
     events = [json.loads(line) for line in second.text.strip().split('\n') if line]
-    assert events[0] == {'type': 'chunk', 'text': 'Partial output'}
+    assert next(event for event in events if event['type'] == 'chunk') == {'type': 'chunk', 'text': 'Partial output', 'request_id': events[0]['request_id']}
     assert events[-1]['type'] == 'error'
     assert events[-1]['partial'] is True
     assert 'secret rate-limit details' not in second.text
@@ -833,21 +860,21 @@ def test_delete_provider_rejects_wrong_owner():
 
 def test_list_provider_models_calls_provider_and_returns_results():
     token = signup('provmodels@example.com')
-    configure_provider(token)
+    configure_provider(token, provider='groq')
 
     mock_provider = MagicMock()
     mock_provider.list_models.return_value = [
-        {'model_key': 'gpt-4o', 'display_name': 'GPT-4o', 'is_local': False},
-        {'model_key': 'gpt-4o-mini', 'display_name': 'GPT-4o mini', 'is_local': False},
+        {'model_key': 'openai/gpt-oss-20b', 'display_name': 'GPT OSS 20B', 'is_local': False},
+        {'model_key': 'qwen/qwen3.8-27b', 'display_name': 'Qwen 3.8 27B', 'is_local': False},
     ]
 
     with patch('app.api.routes.get_provider', return_value=mock_provider):
-        r = client.get('/api/v1/providers/openai/models', headers=headers(token))
+        r = client.get('/api/v1/providers/groq/models', headers=headers(token))
 
     assert r.status_code == 200
     data = r.json()
     assert len(data) == 2
-    assert data[0]['model_key'] == 'gpt-4o'
+    assert data[0]['model_key'] == 'openai/gpt-oss-20b'
     # Verify the API key was never returned
     assert all('api_key' not in item for item in data)
     assert all('key' not in str(item).lower() or 'model_key' in item for item in data)
@@ -1050,20 +1077,127 @@ def test_nvidia_generation_404_uses_safe_model_unavailable_message():
     assert 'provider detail is private' not in response.text
 
 
+def test_openrouter_free_model_unavailable_falls_back_to_free_router():
+    from app.services.llm.errors import ProviderError
+
+    token = signup('openrouter-free-fallback@example.com')
+    conv_id = make_conversation(token)
+    model_key = 'nvidia/nemotron-3.5-super-vl:free'
+    seed_model(provider='openrouter', model_key=model_key, display_name='Nemotron 3.5 Super VL (free)')
+    configure_provider(token, provider='openrouter', api_key='openrouter-user-generation-key')
+
+    provider = MagicMock()
+
+    def stream(_messages, _api_key, selected_model, _max_output_tokens=None):
+        if selected_model == model_key:
+            raise ProviderError('openrouter', selected_model, 404, 'MODEL_NOT_FOUND', 'NotFoundError')
+        assert selected_model == 'openrouter/free'
+        return iter(['Free router response'])
+
+    provider.stream.side_effect = stream
+    with patch('app.api.routes.get_provider', return_value=provider):
+        response = client.post(
+            f'/api/v1/conversations/{conv_id}/generate',
+            headers=headers(token),
+            json={'message': 'Hello', 'provider': 'openrouter', 'model_key': model_key},
+        )
+
+    assert response.status_code == 200
+    events = [json.loads(line) for line in response.text.strip().split('\n') if line]
+    assert any(event.get('type') == 'status' and 'free model router' in event.get('message', '') for event in events)
+    assert 'Free router response' in response.text
+    assert [call.args[2] for call in provider.stream.call_args_list] == [model_key, 'openrouter/free']
+    saved = client.get(f'/api/v1/conversations/{conv_id}/messages', headers=headers(token)).json()
+    assert any(message['role'] == 'assistant' and message['model_id'] == 'openrouter/free' for message in saved)
+
+
+def test_openrouter_free_model_partial_response_does_not_retry():
+    from app.services.llm.errors import ProviderError
+
+    token = signup('openrouter-free-partial@example.com')
+    conv_id = make_conversation(token)
+    model_key = 'google/gemma-4-31b-it:free'
+    seed_model(provider='openrouter', model_key=model_key, display_name='Gemma 4 31B (free)')
+    configure_provider(token, provider='openrouter', api_key='openrouter-user-generation-key')
+
+    provider = MagicMock()
+
+    def stream(_messages, _api_key, selected_model, _max_output_tokens=None):
+        assert selected_model == model_key
+        yield 'Partial response'
+        raise ProviderError('openrouter', selected_model, 404, 'MODEL_NOT_FOUND', 'NotFoundError')
+
+    provider.stream.side_effect = stream
+    with patch('app.api.routes.get_provider', return_value=provider):
+        response = client.post(
+            f'/api/v1/conversations/{conv_id}/generate',
+            headers=headers(token),
+            json={'message': 'Hello', 'provider': 'openrouter', 'model_key': model_key},
+        )
+
+    assert 'Partial response' in response.text
+    assert 'OpenRouter’s free model router' not in response.text
+    assert provider.stream.call_count == 1
+
+
+def test_openrouter_billing_error_does_not_fallback_or_leak_provider_details():
+    from app.services.llm.errors import ProviderError
+
+    token = signup('openrouter-402-no-fallback@example.com')
+    conv_id = make_conversation(token)
+    model_key = 'vendor/example:free'
+    seed_model(provider='openrouter', model_key=model_key, display_name='Example Free Model')
+    configure_provider(token, provider='openrouter', api_key='openrouter-user-generation-key')
+    provider = MagicMock()
+    provider.stream.side_effect = ProviderError(
+        'openrouter', model_key, 402, 'PROVIDER_BILLING_OR_CREDITS', 'PaymentRequired', 'private billing response'
+    )
+
+    with patch('app.api.routes.get_provider', return_value=provider):
+        response = client.post(
+            f'/api/v1/conversations/{conv_id}/generate',
+            headers=headers(token),
+            json={'message': 'Hello', 'provider': 'openrouter', 'model_key': model_key},
+        )
+
+    events = [json.loads(line) for line in response.text.strip().split('\n') if line]
+    error = next(event for event in events if event['type'] == 'error')
+    assert provider.stream.call_count == 1
+    assert error['code'] == 'PROVIDER_BILLING_OR_CREDITS'
+    assert 'private billing response' not in response.text
+
+
+def test_paid_registry_model_cannot_be_selected_even_if_provider_is_enabled():
+    token = signup('paid-registry-model@example.com')
+    conv_id = make_conversation(token)
+    model_key = 'paid-model-test'
+    seed_model(provider='openai', model_key=model_key, display_name='Paid model', is_free=False)
+    configure_provider(token, provider='openai')
+
+    response = client.post(
+        f'/api/v1/conversations/{conv_id}/generate',
+        headers=headers(token),
+        json={'message': 'Hello', 'provider': 'openai', 'model_key': model_key},
+    )
+
+    assert response.status_code == 400
+    assert 'verified free catalog' in response.json()['detail']
+
+
 def test_provider_model_refresh_upserts_current_metadata():
     token = signup('groq-refresh@example.com')
     configure_provider(token, provider='groq', api_key='user-groq-secret-123')
     provider = MagicMock()
     provider.list_models.return_value = [
-        {'model_key': 'current-groq-model', 'display_name': 'Current Groq Model', 'context_length': 131072, 'is_free': None},
+        {'model_key': 'openai/gpt-oss-20b', 'display_name': 'GPT OSS 20B', 'context_length': 131072, 'is_free': None},
     ]
     with patch('app.api.routes.get_provider', return_value=provider):
         first = client.get('/api/v1/providers/groq/models', headers=headers(token))
         second = client.get('/api/v1/providers/groq/models', headers=headers(token))
     assert first.status_code == 200 and second.status_code == 200
-    assert first.json()[0]['model_key'] == 'current-groq-model'
+    assert first.json()[0]['model_key'] == 'openai/gpt-oss-20b'
     db = TestingSession()
-    rows = db.scalars(select(ModelRegistry).where(ModelRegistry.provider == 'groq', ModelRegistry.model_key == 'current-groq-model')).all()
+    rows = db.scalars(select(ModelRegistry).where(ModelRegistry.provider == 'groq', ModelRegistry.model_key == 'openai/gpt-oss-20b')).all()
     assert len(rows) == 1
     assert rows[0].context_window == 131072
     db.close()

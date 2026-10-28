@@ -42,11 +42,12 @@ def _supports_text_chat(model_id: str, metadata: dict) -> bool:
 
     architecture = metadata.get("architecture")
     if not isinstance(architecture, dict):
-        # Older OpenRouter responses may omit architecture; preserve the model
-        # rather than hiding it on incomplete metadata.
-        return True
+        # Unknown modality is not sufficient evidence for a chat picker.
+        return False
     input_modalities = architecture.get("input_modalities")
     output_modalities = architecture.get("output_modalities")
+    if isinstance(input_modalities, list) and isinstance(output_modalities, list):
+        return "text" in input_modalities and "text" in output_modalities
     if isinstance(input_modalities, list) and "text" not in input_modalities:
         return False
     if isinstance(output_modalities, list) and "text" not in output_modalities:
@@ -55,7 +56,7 @@ def _supports_text_chat(model_id: str, metadata: dict) -> bool:
     if isinstance(modality, str) and "->" in modality:
         input_mode, output_mode = modality.split("->", 1)
         return "text" in input_mode.split("+") and "text" in output_mode.split("+")
-    return True
+    return False
 
 
 def _client(api_key: str):
@@ -66,6 +67,7 @@ def _client(api_key: str):
             base_url=_BASE_URL,
             default_headers=_DEFAULT_HEADERS,
             timeout=45.0,
+            max_retries=0,
         )
     except ImportError as exc:
         raise HTTPException(503, "openai SDK is not installed") from exc
@@ -103,7 +105,11 @@ class OpenRouterProvider(LLMProvider):
                     pricing = getattr(pricing, "model_dump", lambda: {})()
                 prompt = pricing.get("prompt")
                 completion = pricing.get("completion")
-                is_free = prompt is not None and completion is not None and float(prompt) == 0 and float(completion) == 0
+                try:
+                    is_free = prompt is not None and completion is not None and float(prompt) == 0 and float(completion) == 0
+                except (TypeError, ValueError):
+                    # Incomplete or nonnumeric prices are unknown, not free.
+                    is_free = False
                 # This integration was added for free-model discovery. Paid
                 # catalog entries can be listed by OpenRouter while a user's
                 # account has no credits, then fail at generation with HTTP 402.

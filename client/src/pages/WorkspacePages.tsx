@@ -7,7 +7,7 @@ import { cn } from "@/lib/utils";
 import {
   Archive, ArrowDownToLine, ArrowRight, BarChart3, Bell, Bot, BrainCircuit, CalendarClock, Check, ChevronDown, ChevronsUpDown, CircleAlert, Clock3, Copy, Download, Edit3, Ellipsis, ExternalLink, FileText, Filter, FolderOpen, Gauge, Globe2, KeyRound, LayoutDashboard, LockKeyhole, Mail, MessageSquareText, MoreHorizontal, Network, PanelRightClose, Pencil, Pin, Plus, RefreshCw, Search, SendHorizontal, Settings2, ShieldAlert, ShieldCheck, SlidersHorizontal, Sparkles, Tags, Trash2, Undo2, UserRound, X,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Link, useLocation, useRoute } from "wouter";
 import { Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip as ChartTooltip, XAxis, YAxis } from "recharts";
@@ -40,8 +40,26 @@ function ChatPage() {
   const [messageText, setMessageText] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
   const [draftResponse, setDraftResponse] = useState("");
+  const [generationStatus, setGenerationStatus] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
   const [memoryEnabled, setMemoryEnabled] = useState(true);
+  const activeConvIdRef = useRef(activeConvId);
+  const generationAbortRef = useRef<AbortController | null>(null);
+  activeConvIdRef.current = activeConvId;
+
+  useEffect(() => {
+    return () => {
+      generationAbortRef.current?.abort();
+      generationAbortRef.current = null;
+    };
+  }, [activeConvId]);
+
+  useEffect(() => {
+    setIsGenerating(false);
+    setDraftResponse("");
+    setGenerationStatus("");
+    setErrorMsg("");
+  }, [activeConvId]);
 
   const activeConversation = conversationsList.find((c) => c.id === activeConvId);
 
@@ -171,6 +189,7 @@ function ChatPage() {
     setErrorMsg("");
     setIsGenerating(true);
     setDraftResponse("");
+    setGenerationStatus(`Sending request to ${selectedModel.provider}…`);
 
     const optimisticId = Math.random().toString();
     const userMsg: Message = {
@@ -219,8 +238,10 @@ function ChatPage() {
         setMessagesList((prev) => [...prev, assistantMessage]);
         setIsGenerating(false);
         setDraftResponse("");
+        setGenerationStatus("");
       } catch (error) {
         setIsGenerating(false);
+        setGenerationStatus("");
         setErrorMsg(error instanceof Error ? error.message : "Ollama generation failed.");
       }
       return;
@@ -231,22 +252,48 @@ function ChatPage() {
       provider: selectedModel.provider,
       model_key: selectedModel.model_key,
     };
+    const generationConversationId = activeConvId;
+    const generationModel = selectedModel;
+    let streamedResponse = "";
 
     api.conversations.generate(
-      activeConvId,
+      generationConversationId,
       req,
       (chunk) => {
+        streamedResponse += chunk;
+        if (activeConvIdRef.current !== generationConversationId) return;
+        setGenerationStatus("");
         setDraftResponse((prev) => prev + chunk);
       },
-      () => {
+      (messageId) => {
+        if (activeConvIdRef.current !== generationConversationId) return;
         setIsGenerating(false);
         setDraftResponse("");
-        api.conversations.listMessages(activeConvId).then(setMessagesList);
+        setGenerationStatus("");
+        const assistantMessage: Message = {
+          id: messageId,
+          conversation_id: generationConversationId,
+          role: "assistant",
+          content: streamedResponse,
+          provider: generationModel.provider,
+          model_id: generationModel.model_key,
+          created_at: new Date().toISOString(),
+        };
+        if (activeConvIdRef.current === generationConversationId) {
+          setMessagesList((prev) => prev.some((msg) => msg.id === messageId) ? prev : [...prev, assistantMessage]);
+          void api.conversations.listMessages(generationConversationId).then((msgs) => {
+            if (activeConvIdRef.current === generationConversationId) setMessagesList(msgs);
+          }).catch(() => undefined);
+        }
       },
       (err) => {
+        if (activeConvIdRef.current !== generationConversationId) return;
         setIsGenerating(false);
+        setGenerationStatus("");
         setErrorMsg(err.message || "An error occurred");
-      }
+      },
+      (generationAbortRef.current = new AbortController()).signal,
+      (status) => setGenerationStatus(status),
     );
   };
 
@@ -282,8 +329,14 @@ function ChatPage() {
             </div>
             <div className="rounded-2xl rounded-tl-sm border border-border bg-card p-4 text-sm leading-6 whitespace-pre-wrap">
               {draftResponse}
-              <span className="mt-3 inline-flex items-center gap-2 text-xs text-muted-foreground block">Drafting response <span className="inline-flex gap-1"><i className="h-1.5 w-1.5 animate-pulse rounded-full bg-[color:var(--memory-teal)]" /><i className="h-1.5 w-1.5 animate-pulse rounded-full bg-[color:var(--memory-teal)] [animation-delay:150ms]" /><i className="h-1.5 w-1.5 animate-pulse rounded-full bg-[color:var(--memory-teal)] [animation-delay:300ms]" /></span></span>
+              <span className="mt-3 inline-flex items-center gap-2 text-xs text-muted-foreground block">{errorMsg ? "Response interrupted" : "Drafting response"} <span className="inline-flex gap-1"><i className="h-1.5 w-1.5 animate-pulse rounded-full bg-[color:var(--memory-teal)]" /><i className="h-1.5 w-1.5 animate-pulse rounded-full bg-[color:var(--memory-teal)] [animation-delay:150ms]" /><i className="h-1.5 w-1.5 animate-pulse rounded-full bg-[color:var(--memory-teal)] [animation-delay:300ms]" /></span></span>
             </div>
+          </div>
+        )}
+        {isGenerating && !draftResponse && (
+          <div className="mx-auto flex w-full max-w-[760px] items-center gap-2 rounded-xl border border-border bg-card px-4 py-3 text-xs text-muted-foreground" role="status" aria-live="polite">
+            <span className="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-current border-t-transparent" />
+            {generationStatus || `Waiting for ${selectedModel?.provider || "the provider"} to respond…`}
           </div>
         )}
         {errorMsg && (

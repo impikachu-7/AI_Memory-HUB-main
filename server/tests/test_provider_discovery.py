@@ -22,6 +22,32 @@ def test_nvidia_provider_registered_and_discovers_models():
     assert models[0]["is_free"] is True
 
 
+def test_nvidia_catalog_accepts_ids_without_optional_modality_fields():
+    """NVIDIA's /models endpoint can omit capability metadata for chat models."""
+    from app.services.llm.nvidia_provider import NvidiaProvider
+    client = MagicMock()
+    client.models.list.return_value.data = [_sdk_model("google/gemma-4-31b-it", labels=["Free Endpoint"])]
+    with patch("openai.OpenAI", return_value=client):
+        models = NvidiaProvider().list_models("user-nvidia-key")
+    assert [model["model_key"] for model in models] == ["google/gemma-4-31b-it"]
+    assert models[0]["is_free"] is True
+
+
+def test_free_model_policy_rejects_unknown_price_evidence():
+    from app.services.llm.free_model_policy import verified_catalog
+    assert verified_catalog("nvidia", [{"model_key": "google/gemma-4-31b-it", "is_free": None}]) == []
+    assert verified_catalog("openrouter", [{"model_key": "vendor/model", "is_free": False}]) == []
+
+
+def test_free_model_policy_intersects_groq_catalog_with_free_chat_allowlist():
+    from app.services.llm.free_model_policy import verified_catalog
+    models = verified_catalog("groq", [
+        {"model_key": "openai/gpt-oss-20b"},
+        {"model_key": "llama-3.3-70b-versatile"},
+    ])
+    assert [model["model_key"] for model in models] == ["openai/gpt-oss-20b"]
+
+
 def test_nvidia_discovery_excludes_non_chat_models():
     from app.services.llm.nvidia_provider import NvidiaProvider
     client = MagicMock()
@@ -43,7 +69,7 @@ def test_nvidia_test_connection_checks_models_endpoint():
     client.models.list.assert_called_once_with()
 
 
-def test_nvidia_client_uses_long_timeout_for_slow_hosted_models():
+def test_nvidia_client_uses_bounded_timeout_without_retries():
     from app.services.llm.nvidia_provider import _BASE_URL, _REQUEST_TIMEOUT_SECONDS, _client
     client = MagicMock()
     with patch("openai.OpenAI", return_value=client) as openai_client:
@@ -53,8 +79,9 @@ def test_nvidia_client_uses_long_timeout_for_slow_hosted_models():
         api_key="user-nvidia-key",
         base_url=_BASE_URL,
         timeout=_REQUEST_TIMEOUT_SECONDS,
+        max_retries=0,
     )
-    assert _REQUEST_TIMEOUT_SECONDS >= 180
+    assert _REQUEST_TIMEOUT_SECONDS == 90
 
 
 def test_nvidia_chat_uses_openai_compatible_client():
@@ -150,6 +177,7 @@ def test_openrouter_client_uses_bounded_timeout():
     with patch("openai.OpenAI", return_value=client) as openai_client:
         _client("user-openrouter-key")
     assert openai_client.call_args.kwargs["timeout"] == 45.0
+    assert openai_client.call_args.kwargs["max_retries"] == 0
 
 
 def test_groq_discovery_uses_live_catalog():

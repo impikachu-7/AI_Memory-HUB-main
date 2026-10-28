@@ -7,9 +7,9 @@ from app.services.llm.base import LLMProvider
 from app.services.llm.errors import provider_error
 
 _BASE_URL = "https://integrate.api.nvidia.com/v1"
-# Large hosted models can take longer than the default short request window,
-# especially during cold starts. This is an HTTP client timeout, not a retry.
-_REQUEST_TIMEOUT_SECONDS = 180.0
+# NVIDIA's shared endpoints can stall. Keep one attempt bounded so automatic
+# SDK retries cannot turn a single timeout into several minutes of silence.
+_REQUEST_TIMEOUT_SECONDS = 90.0
 _NON_CHAT_MODEL_MARKERS = (
     "embed", "rerank", "whisper", "speech", "transcrib", "tts", "flux",
     "image-generation", "video-generation", "ising-calibration",
@@ -22,6 +22,9 @@ def _supports_chat_completions(model_id: str, metadata: dict) -> bool:
         return False
     endpoints = metadata.get("supported_endpoints")
     if isinstance(endpoints, list):
+        # When NVIDIA supplies endpoint metadata, respect it. Some versions of
+        # its OpenAI-compatible /models endpoint omit these optional fields,
+        # however; absence is not evidence that a valid LLM is non-chat.
         return any("chat/completions" in str(endpoint).lower() for endpoint in endpoints)
     modalities = metadata.get("modalities")
     if isinstance(modalities, dict):
@@ -29,13 +32,27 @@ def _supports_chat_completions(model_id: str, metadata: dict) -> bool:
         outputs = modalities.get("output") or modalities.get("output_modalities")
         if isinstance(inputs, list) and isinstance(outputs, list):
             return "text" in inputs and "text" in outputs
+        if isinstance(inputs, list) and "text" not in inputs:
+            return False
+        if isinstance(outputs, list) and "text" not in outputs:
+            return False
+    # NVIDIA's OpenAI-compatible /models response commonly contains only
+    # standard model fields (id/object/owned_by) rather than modality metadata.
+    # Keep unknown IDs because this endpoint is the chat API's own catalog;
+    # known non-chat model families and explicit negative modality metadata
+    # were rejected above. Free status remains a separate, strict check.
     return True
 
 
 def _client(api_key: str):
     try:
         import openai
-        return openai.OpenAI(api_key=api_key, base_url=_BASE_URL, timeout=_REQUEST_TIMEOUT_SECONDS)
+        return openai.OpenAI(
+            api_key=api_key,
+            base_url=_BASE_URL,
+            timeout=_REQUEST_TIMEOUT_SECONDS,
+            max_retries=0,
+        )
     except ImportError as exc:
         raise HTTPException(503, "openai SDK is not installed") from exc
 
@@ -79,7 +96,7 @@ def _is_not_found(exc: Exception) -> bool:
 
 
 def _free_status(metadata: dict) -> bool | None:
-    for field in ("is_free", "free"):
+    for field in ("is_free", "free", "is_free_endpoint", "free_endpoint"):
         if isinstance(metadata.get(field), bool):
             return metadata[field]
     labels = metadata.get("labels") or metadata.get("tags") or []
