@@ -475,15 +475,16 @@ def generate(
     if provider_name == 'nvidia':
         safe_details['PROVIDER_TIMEOUT'] = 'NVIDIA did not respond within 90 seconds. The request was not retried; try another available model or retry later.'
 
-    def normalized_provider_error(exc: Exception) -> ProviderError:
+    def normalized_provider_error(exc: Exception, failed_model_key: str = model_key) -> ProviderError:
         if isinstance(exc, ProviderError):
             return exc
         status_code = exc.status_code if isinstance(exc, HTTPException) else None
-        return provider_error(exc, provider_name, model_key, status_code)
+        return provider_error(exc, provider_name, failed_model_key, status_code)
 
     def event_stream():
         accumulated = []
         started_at = time.monotonic()
+        response_model_key = model_key
         yield json.dumps({
             'type': 'status',
             'message': f'Request sent to {provider_name.capitalize()}; waiting for its first response…',
@@ -495,16 +496,43 @@ def generate(
                 return
             # Decrypt immediately before use; result is local to this generator
             api_key = decrypt_api_key(encrypted_key) if encrypted_key else None
-            for chunk in provider.stream(llm_messages, api_key, model_key, max_output_tokens):
-                accumulated.append(chunk)
-                yield json.dumps({'type': 'chunk', 'text': chunk}) + '\n'
+            try:
+                chunks = provider.stream(llm_messages, api_key, model_key, max_output_tokens)
+                for chunk in chunks:
+                    accumulated.append(chunk)
+                    yield json.dumps({'type': 'chunk', 'text': chunk}) + '\n'
+            except HTTPException as exc:
+                # A free catalog model may not have a live route for this request.
+                # OpenRouter's free router chooses another routable free chat model.
+                # Retry only before emitting text to avoid duplicate partial answers.
+                can_fallback = (
+                    provider_name == 'openrouter'
+                    and model_key.endswith(':free')
+                    and model_key != 'openrouter/free'
+                    and not accumulated
+                    and exc.status_code in {404, 408, 429, 503}
+                )
+                if not can_fallback:
+                    raise
+                response_model_key = 'openrouter/free'
+                log.warning(
+                    "OpenRouter free model unavailable; retrying with free router requested_model=%s",
+                    model_key,
+                )
+                yield json.dumps({
+                    'type': 'status',
+                    'message': 'That free model has no available route right now; trying OpenRouter’s free model router…',
+                }) + '\n'
+                for chunk in provider.stream(llm_messages, api_key, response_model_key, max_output_tokens):
+                    accumulated.append(chunk)
+                    yield json.dumps({'type': 'chunk', 'text': chunk}) + '\n'
         except HTTPException as exc:
-            normalized = normalized_provider_error(exc)
+            normalized = normalized_provider_error(exc, response_model_key)
             log.error(
                 "%s generation failed provider=%s model=%s status=%s error_type=%s duration_seconds=%.1f",
                 provider_name.capitalize(),
                 provider_name,
-                model_key,
+                response_model_key,
                 normalized.provider_status,
                 normalized.error_type,
                 time.monotonic() - started_at,
@@ -516,7 +544,7 @@ def generate(
                 'code': normalized.code,
                 'detail': safe_details.get(normalized.code, safe_details['PROVIDER_ERROR']),
                 'provider': provider_name,
-                'model_key': model_key,
+                'model_key': response_model_key,
                 'recoverable': True,
                 'partial': bool(accumulated),
             }) + '\n'
@@ -544,11 +572,11 @@ def generate(
                     role='assistant',
                     content=final_text,
                     provider=provider_name,
-                    model_id=model_key,
+                    model_id=response_model_key,
                 )
                 db.add(asst_msg)
                 db.commit()
-                record_event(db, user_id, 'message_completed', provider_name, model_key, model_entry.is_local)
+                record_event(db, user_id, 'message_completed', provider_name, response_model_key, model_entry.is_local)
                 db.commit()
                 db.refresh(asst_msg)
                 # Run existing memory extraction heuristic
