@@ -261,7 +261,8 @@ export const api = {
       onChunk: (text: string) => void,
       onDone: (messageId: string) => void,
       onError: (err: Error) => void,
-      signal?: AbortSignal
+      signal?: AbortSignal,
+      onStatus?: (message: string) => void
     ): void => {
       fetch(`${API_BASE_URL}/conversations/${conversationId}/generate`, {
         method: "POST",
@@ -288,6 +289,38 @@ export const api = {
           if (!reader) throw new Error("Response body is not readable.");
           const decoder = new TextDecoder();
           let buffer = "";
+          let completed = false;
+          const processLine = (line: string) => {
+            if (!line.trim()) return false;
+            const event = JSON.parse(line);
+            if (event.type === "chunk") onChunk(event.text);
+            else if (event.type === "status") onStatus?.(event.message || "Waiting for the provider response…");
+            else if (event.type === "done") {
+              completed = true;
+              onDone(event.message_id);
+              return true;
+            } else if (event.type === "error") {
+              const details: Record<string, string> = {
+                PROVIDER_AUTH_ERROR: "Provider authentication failed.",
+                PROVIDER_BILLING_OR_CREDITS: "Provider account or credits cannot currently serve this request.",
+                PROVIDER_FORBIDDEN: "Provider access was denied for this request.",
+                MODEL_NOT_FOUND: "Selected model is unavailable.",
+                PROVIDER_TIMEOUT: "Provider request timed out.",
+                PROVIDER_CONFLICT: "Provider could not accept this request in its current state.",
+                RATE_LIMITED: "Provider rate limit reached.",
+                PROVIDER_UNAVAILABLE: "Provider temporarily unavailable.",
+                CONTEXT_LIMIT_EXCEEDED: "Context limit exceeded.",
+                GENERATION_LIMIT_REACHED: "Generation limit reached.",
+                PROVIDER_ERROR: "The provider could not complete this request.",
+              };
+              const message = event.detail || details[event.code] || "Error during generation";
+              const source = [event.provider, event.model_key].filter(Boolean).join(" · ");
+              const error = new Error(source ? `${message} (${source})` : message);
+              (error as Error & { code?: string }).code = event.code;
+              throw error;
+            }
+            return false;
+          };
           while (true) {
             const { done, value } = await reader.read();
             if (done) break;
@@ -295,37 +328,15 @@ export const api = {
             const lines = buffer.split("\n");
             buffer = lines.pop() ?? "";
             for (const line of lines) {
-              if (!line.trim()) continue;
-              try {
-                const event = JSON.parse(line);
-                if (event.type === "chunk") onChunk(event.text);
-                else if (event.type === "done") onDone(event.message_id);
-                else if (event.type === "error") {
-                  const details: Record<string, string> = {
-                    PROVIDER_AUTH_ERROR: "Provider authentication failed.",
-                    PROVIDER_BILLING_OR_CREDITS: "Provider account or credits cannot currently serve this request.",
-                    PROVIDER_FORBIDDEN: "Provider access was denied for this request.",
-                    MODEL_NOT_FOUND: "Selected model is unavailable.",
-                    PROVIDER_TIMEOUT: "Provider request timed out.",
-                    PROVIDER_CONFLICT: "Provider could not accept this request in its current state.",
-                    RATE_LIMITED: "Provider rate limit reached.",
-                    PROVIDER_UNAVAILABLE: "Provider temporarily unavailable.",
-                    CONTEXT_LIMIT_EXCEEDED: "Context limit exceeded.",
-                    GENERATION_LIMIT_REACHED: "Generation limit reached.",
-                    PROVIDER_ERROR: "The provider could not complete this request.",
-                  };
-                  const message = event.detail || details[event.code] || "Error during generation";
-                  const source = [event.provider, event.model_key].filter(Boolean).join(" · ");
-                  const error = new Error(source ? `${message} (${source})` : message);
-                  (error as Error & { code?: string }).code = event.code;
-                  throw error;
-                }
-              } catch (error) {
-                onError(error instanceof Error ? error : new Error(String(error)));
+              if (processLine(line)) {
+                await reader.cancel().catch(() => undefined);
                 return;
               }
             }
           }
+          buffer += decoder.decode();
+          if (buffer.trim() && processLine(buffer)) return;
+          if (!completed) throw new Error("The connection ended before the model finished responding. Please try again.");
         })
         .catch((error) => {
           if (error.name === "AbortError") return;

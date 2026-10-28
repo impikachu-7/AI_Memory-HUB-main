@@ -43,7 +43,7 @@ def test_nvidia_test_connection_checks_models_endpoint():
     client.models.list.assert_called_once_with()
 
 
-def test_nvidia_client_uses_long_timeout_for_slow_hosted_models():
+def test_nvidia_client_uses_bounded_timeout_without_retries():
     from app.services.llm.nvidia_provider import _BASE_URL, _REQUEST_TIMEOUT_SECONDS, _client
     client = MagicMock()
     with patch("openai.OpenAI", return_value=client) as openai_client:
@@ -53,8 +53,9 @@ def test_nvidia_client_uses_long_timeout_for_slow_hosted_models():
         api_key="user-nvidia-key",
         base_url=_BASE_URL,
         timeout=_REQUEST_TIMEOUT_SECONDS,
+        max_retries=0,
     )
-    assert _REQUEST_TIMEOUT_SECONDS >= 180
+    assert _REQUEST_TIMEOUT_SECONDS == 90
 
 
 def test_nvidia_chat_uses_openai_compatible_client():

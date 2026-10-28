@@ -4,6 +4,7 @@ import hmac
 import json
 import logging
 import secrets
+import time
 import uuid
 from urllib.parse import urlencode
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Query, Response, status
@@ -471,6 +472,8 @@ def generate(
         'PROVIDER_UNAVAILABLE': f'{provider_name.capitalize()} temporarily unavailable.',
         'PROVIDER_ERROR': 'The provider could not complete this request.',
     }
+    if provider_name == 'nvidia':
+        safe_details['PROVIDER_TIMEOUT'] = 'NVIDIA did not respond within 90 seconds. The request was not retried; try another available model or retry later.'
 
     def normalized_provider_error(exc: Exception) -> ProviderError:
         if isinstance(exc, ProviderError):
@@ -480,6 +483,11 @@ def generate(
 
     def event_stream():
         accumulated = []
+        started_at = time.monotonic()
+        yield json.dumps({
+            'type': 'status',
+            'message': f'Request sent to {provider_name.capitalize()}; waiting for its first response…',
+        }) + '\n'
         try:
             provider = get_provider(provider_name)
             if not encrypted_key and provider_name != 'ollama':
@@ -493,12 +501,13 @@ def generate(
         except HTTPException as exc:
             normalized = normalized_provider_error(exc)
             log.error(
-                "%s generation failed provider=%s model=%s status=%s error_type=%s",
+                "%s generation failed provider=%s model=%s status=%s error_type=%s duration_seconds=%.1f",
                 provider_name.capitalize(),
                 provider_name,
                 model_key,
                 normalized.provider_status,
                 normalized.error_type,
+                time.monotonic() - started_at,
             )
             record_event(db, user_id, 'message_failed', provider_name, model_key, model_entry.is_local)
             db.commit()
@@ -548,8 +557,24 @@ def generate(
             except Exception:
                 log.exception("Failed to persist assistant message")
                 yield json.dumps({'type': 'error', 'detail': 'Failed to save response'}) + '\n'
+        else:
+            record_event(db, user_id, 'message_failed', provider_name, model_key, model_entry.is_local)
+            db.commit()
+            yield json.dumps({
+                'type': 'error',
+                'code': 'EMPTY_RESPONSE',
+                'detail': 'The provider finished without returning a response. Try again or select another model.',
+                'provider': provider_name,
+                'model_key': model_key,
+                'recoverable': True,
+                'partial': False,
+            }) + '\n'
 
-    return StreamingResponse(event_stream(), media_type='application/x-ndjson')
+    return StreamingResponse(
+        event_stream(),
+        media_type='application/x-ndjson',
+        headers={'Cache-Control': 'no-cache, no-transform', 'X-Accel-Buffering': 'no'},
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -305,6 +305,7 @@ def test_generate_saves_user_and_assistant_messages():
     lines = [line for line in r.text.strip().split('\n') if line]
     events = [json.loads(line) for line in lines]
     chunk_types = [e['type'] for e in events]
+    assert events[0]['type'] == 'status'
     assert 'chunk' in chunk_types
     assert 'done' in chunk_types
 
