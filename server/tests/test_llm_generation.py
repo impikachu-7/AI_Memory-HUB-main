@@ -713,35 +713,62 @@ def test_cross_user_cannot_access_another_users_provider_models():
 # J. GET /models — filtered by user's enabled providers (server-side)
 # ---------------------------------------------------------------------------
 
-def test_models_endpoint_filtered_by_enabled_providers():
+def test_models_endpoint_refreshes_enabled_provider_catalog_and_hides_stale_models():
     alice = signup('modelfilter-alice@example.com')
-    seed_model(provider='openai', model_key='gpt-4o-filter-test', display_name='GPT-4o')
-    seed_model(provider='anthropic', model_key='claude-sonnet-filter-test', display_name='Claude Sonnet')
-
-    # Alice has no providers yet
-    r = client.get('/api/v1/models', headers=headers(alice))
-    assert r.status_code == 200
-    assert r.json() == []
-
-    # Configure openai only
+    stale_key = 'retired-openai-filter-test'
+    seed_model(provider='openai', model_key=stale_key, display_name='Retired model')
+    seed_model(provider='anthropic', model_key='claude-filter-test', display_name='Claude')
     configure_provider(alice, provider='openai', is_enabled=True)
-    r = client.get('/api/v1/models', headers=headers(alice))
-    data = r.json()
-    providers_returned = {m['provider'] for m in data}
-    assert 'openai' in providers_returned
-    assert 'anthropic' not in providers_returned
+
+    provider = MagicMock()
+    provider.list_models.return_value = [
+        {'model_key': 'gpt-live-filter-test', 'display_name': 'Live GPT model', 'is_local': False}
+    ]
+    with patch('app.api.routes.get_provider', return_value=provider):
+        response = client.get('/api/v1/models', headers=headers(alice))
+
+    assert response.status_code == 200
+    data = response.json()
+    assert [(model['provider'], model['model_key']) for model in data] == [
+        ('openai', 'gpt-live-filter-test')
+    ]
+    provider.list_models.assert_called_once_with('sk-test-key-abcdefgh')
+    db = TestingSession()
+    stale = db.scalar(select(ModelRegistry).where(
+        ModelRegistry.provider == 'openai',
+        ModelRegistry.model_key == stale_key,
+    ))
+    assert stale is not None and stale.is_active is False
+    db.close()
 
 
-def test_models_endpoint_excludes_disabled_provider():
+def test_models_endpoint_excludes_disabled_provider_without_catalog_call():
     user = signup('modelfilter-disabled@example.com')
     seed_model(provider='groq', model_key='llama-filter-test', display_name='Llama')
     configure_provider(user, provider='groq', is_enabled=False)
 
-    r = client.get('/api/v1/models', headers=headers(user))
-    assert r.status_code == 200
-    data = r.json()
-    # Disabled provider must not appear
-    assert all(m['provider'] != 'groq' for m in data)
+    with patch('app.api.routes.get_provider') as get_provider_mock:
+        response = client.get('/api/v1/models', headers=headers(user))
+
+    assert response.status_code == 200
+    assert response.json() == []
+    get_provider_mock.assert_not_called()
+
+
+def test_models_endpoint_omits_stale_provider_models_when_discovery_fails():
+    token = signup('models-discovery-failure@example.com')
+    stale_key = 'stale-live-catalog-entry'
+    seed_model(provider='deepseek', model_key=stale_key, display_name='Stale DeepSeek model')
+    configure_provider(token, provider='deepseek', api_key='deepseek-user-key-abcdefgh')
+
+    provider = MagicMock()
+    provider.list_models.side_effect = RuntimeError('provider unreachable')
+    with patch('app.api.routes.get_provider', return_value=provider):
+        response = client.get('/api/v1/models', headers=headers(token))
+
+    assert response.status_code == 200
+    assert all(model['provider'] != 'deepseek' for model in response.json())
+
 
 
 # ---------------------------------------------------------------------------
