@@ -111,6 +111,7 @@ class GenerateRequest(BaseModel):
     provider: str = Field(pattern="^(openai|gemini|anthropic|deepseek|groq|openrouter|ollama|kie|nvidia)$")
     model_key: str = Field(min_length=1)
     image_url: HttpUrl | None = None
+    allow_free_fallback: bool = False
 
 class ProviderUpdate(BaseModel):
     api_key: str | None = Field(default=None, min_length=8)
@@ -126,6 +127,18 @@ class ProviderModelRead(BaseModel):
     context_length: int | None = None
     is_free: bool | None = None
     is_local: bool = False
+
+class ProviderModelRefreshRead(BaseModel):
+    provider: str
+    discovered_count: int
+    eligible_count: int
+    registered_count: int
+    created_count: int
+    updated_count: int
+    deactivated_count: int
+    excluded_count: int
+    excluded_reasons: dict[str, int] = Field(default_factory=dict)
+    models: list[ProviderModelRead]
 
 class LocalModelRegisterRequest(BaseModel):
     model_key: str = Field(min_length=1, max_length=150)

@@ -1,6 +1,9 @@
 """Safe, normalized errors raised by cloud LLM providers."""
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
+
 from fastapi import HTTPException
 
 
@@ -26,12 +29,14 @@ class ProviderError(HTTPException):
         code: str,
         error_type: str,
         detail: str = "Provider request failed",
+        retry_after_seconds: int | None = None,
     ) -> None:
         self.provider = provider
         self.model = model
         self.provider_status = status_code
         self.code = code
         self.error_type = error_type
+        self.retry_after_seconds = retry_after_seconds
         super().__init__(status_code, detail)
 
 
@@ -56,4 +61,31 @@ def provider_error(
         code = "PROVIDER_UNAVAILABLE"
     else:
         code = _CODE_BY_STATUS.get(status, "PROVIDER_ERROR")
-    return ProviderError(provider, model, status, code, type(exc).__name__)
+    retry_after = _retry_after_seconds(exc) if provider == "openrouter" and status == 429 else None
+    return ProviderError(provider, model, status, code, type(exc).__name__, retry_after_seconds=retry_after)
+
+
+def _retry_after_seconds(exc: Exception) -> int | None:
+    """Extract only a bounded, numeric retry hint from response headers."""
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if not headers:
+        return None
+    value = headers.get("retry-after") or headers.get("Retry-After")
+    if value:
+        try:
+            return max(0, min(86400, int(float(value))))
+        except (TypeError, ValueError):
+            try:
+                reset_at = parsedate_to_datetime(str(value))
+                if reset_at.tzinfo is None:
+                    reset_at = reset_at.replace(tzinfo=UTC)
+                return max(0, min(86400, int((reset_at - datetime.now(UTC)).total_seconds())))
+            except (TypeError, ValueError, OverflowError):
+                pass
+    # OpenRouter/provider limits may expose a Unix reset timestamp instead.
+    value = headers.get("x-ratelimit-reset") or headers.get("X-RateLimit-Reset")
+    try:
+        return max(0, min(86400, int(float(value) - datetime.now(UTC).timestamp()))) if value else None
+    except (TypeError, ValueError, OverflowError):
+        return None

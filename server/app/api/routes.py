@@ -562,29 +562,34 @@ def generate(
                     accumulated.append(chunk)
                     yield json.dumps({'type': 'chunk', 'text': chunk, 'request_id': request_id}) + '\n'
             except HTTPException as exc:
-                # OpenRouter's :free catalog entries can remain listed even
-                # when that exact route has no live endpoint for this request.
-                # Its free router chooses another currently routable free chat
-                # model. Retry only before any text has been emitted, so a
-                # partial answer is never duplicated or silently switched.
+                # Optional single-hop fallback is permitted only when the
+                # caller explicitly opted in and the exact fallback is active
+                # in this account's verified-free registry. Never switch on
+                # 429: that is commonly an account quota, not model routing.
+                fallback_model = 'openrouter/free'
+                fallback_registered = db.scalar(select(ModelRegistry).where(
+                    ModelRegistry.provider == 'openrouter',
+                    ModelRegistry.model_key == fallback_model,
+                    ModelRegistry.is_active.is_(True),
+                    ModelRegistry.is_free.is_(True),
+                )) is not None
                 can_fallback = (
                     provider_name == 'openrouter'
+                    and body.allow_free_fallback
                     and model_key.endswith(':free')
-                    and model_key != 'openrouter/free'
+                    and model_key != fallback_model
                     and not accumulated
-                    and exc.status_code in {404, 408, 429, 503}
+                    and fallback_registered
+                    and exc.status_code in {404, 503}
                 )
                 if not can_fallback:
                     raise
-                response_model_key = 'openrouter/free'
+                response_model_key = fallback_model
                 retry_count = 1
-                log.warning(
-                    "OpenRouter free model unavailable; retrying with free router requested_model=%s",
-                    model_key,
-                )
+                log.info("OpenRouter free fallback explicitly allowed request_id=%s selected_model=%s", request_id, model_key)
                 yield json.dumps({
                     'type': 'status',
-                    'message': 'That free model has no available route right now; trying OpenRouter’s free model router…',
+                    'message': 'The selected free route is unavailable; trying the verified free router as allowed.',
                     'request_id': request_id,
                 }) + '\n'
                 for chunk in provider.stream(llm_messages, api_key, response_model_key, max_output_tokens):
@@ -610,15 +615,21 @@ def generate(
             )
             record_event(db, user_id, 'message_failed', provider_name, response_model_key, model_entry.is_local)
             db.commit()
+            detail = safe_details.get(normalized.code, safe_details['PROVIDER_ERROR'])
+            if provider_name == 'openrouter' and normalized.code == 'RATE_LIMITED':
+                detail = 'OpenRouter free-model quota is currently rate limited. No retry or model switch was attempted.'
+                if normalized.retry_after_seconds is not None:
+                    detail += f" Try again in about {normalized.retry_after_seconds} seconds."
             yield json.dumps({
                 'type': 'error',
                 'code': normalized.code,
-                'detail': safe_details.get(normalized.code, safe_details['PROVIDER_ERROR']),
+                'detail': detail,
                 'provider': provider_name,
                 'model_key': response_model_key,
                 'recoverable': True,
                 'partial': bool(accumulated),
                 'request_id': request_id,
+                **({'retry_after_seconds': normalized.retry_after_seconds} if normalized.retry_after_seconds is not None else {}),
             }) + '\n'
             return
         except Exception as exc:
@@ -819,7 +830,7 @@ def delete_provider(provider_name: str, db: Session = Depends(get_db), user: Use
 def delete_provider_credentials(provider_name: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
     return delete_provider(provider_name, db, user)
 
-@router.get('/providers/{provider_name}/models', response_model=list[ProviderModelRead])
+@router.get('/providers/{provider_name}/models', response_model=ProviderModelRefreshRead)
 def list_provider_models(provider_name: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
     """List live models available from the provider.
 
@@ -835,19 +846,49 @@ def list_provider_models(provider_name: str, db: Session = Depends(get_db), user
     )
     if config is None:
         raise HTTPException(404, 'Provider not configured')
-    # This is the explicit Provider Settings refresh action; always bypass the
-    # short chat catalog cache and only persist evidence-backed free models.
-    raw_models = discover_free_catalog(user.id, config, force_refresh=True)
+    # Explicit refresh is diagnostic: retain raw chat-compatible discovery
+    # counts so an empty result is distinguishable from a failed API call or
+    # catalog entries excluded by the application's free-only policy.
+    try:
+        api_key = decrypt_api_key(config.encrypted_api_key) if config.encrypted_api_key else None
+        discovered = get_provider(provider_name).list_models(api_key)
+        raw_models = verified_catalog(provider_name, discovered)
+    except HTTPException as exc:
+        # Keep provider status for callers, but never forward upstream body text
+        # which could contain credentials or account-specific data.
+        safe = {
+            401: 'Provider authentication failed. Check the saved API key.',
+            403: 'Provider denied model discovery for this account.',
+            429: 'Provider rate limit reached during model discovery. Wait before refreshing.',
+        }.get(exc.status_code, 'Provider model discovery failed. Existing registered models were kept.')
+        raise HTTPException(status_code=exc.status_code if 400 <= exc.status_code < 500 else 502, detail=safe) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail='Provider model discovery failed. Existing registered models were kept.') from exc
+    excluded_reasons: dict[str, int] = {}
+    for item in discovered:
+        if item.get('is_free') is True:
+            continue
+        reason = 'free_status_unknown' if item.get('is_free') is None else 'not_verified_free'
+        excluded_reasons[reason] = excluded_reasons.get(reason, 0) + 1
     if provider_name == 'ollama':
-        return [ProviderModelRead(**m) for m in raw_models]
+        models = [ProviderModelRead(**m) for m in raw_models]
+        return ProviderModelRefreshRead(provider=provider_name, discovered_count=len(discovered), eligible_count=len(models),
+            registered_count=len(models), created_count=0, updated_count=0, deactivated_count=0,
+            excluded_count=max(0, len(discovered) - len(models)), excluded_reasons=excluded_reasons, models=models)
     # Keep old rows for history, but make paid/unknown models impossible to
     # select. Unique(provider, model_key) keeps this upsert idempotent.
     # A successful catalog refresh is authoritative for this provider: keep
     # historical rows, but deactivate models that disappeared or are no longer
     # positively verified as free. A failed discovery never reaches this write.
+    existing_active = db.query(ModelRegistry).filter(
+        ModelRegistry.provider == provider_name,
+        ModelRegistry.is_active.is_(True),
+    ).count()
     db.query(ModelRegistry).filter(
         ModelRegistry.provider == provider_name,
     ).update({ModelRegistry.is_active: False}, synchronize_session=False)
+    created_count = 0
+    updated_count = 0
     for item in raw_models:
         model_key = str(item.get('model_key') or '')
         if not model_key:
@@ -856,13 +897,28 @@ def list_provider_models(provider_name: str, db: Session = Depends(get_db), user
         if existing is None:
             existing = ModelRegistry(provider=provider_name, model_key=model_key, display_name=str(item.get('display_name') or model_key), is_local=False, is_active=True, is_free=True)
             db.add(existing)
+            created_count += 1
+        else:
+            updated_count += 1
         existing.display_name = str(item.get('display_name') or model_key)[:150]
         existing.context_window = item.get('context_length')
         existing.is_free = True
         existing.is_local = False
         existing.is_active = True
-    db.commit()
-    return [ProviderModelRead(**m) for m in raw_models]
+    try:
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail='Model discovery succeeded, but registry synchronization failed. Existing models were kept.') from exc
+    config_version = config.updated_at.isoformat() if config.updated_at else str(config.id)
+    with _MODEL_CATALOG_CACHE_LOCK:
+        _MODEL_CATALOG_CACHE[(user.id, config.provider, config_version)] = (time.monotonic(), [dict(item) for item in raw_models])
+    models = [ProviderModelRead(**m) for m in raw_models]
+    deactivated_count = max(0, existing_active - updated_count)
+    return ProviderModelRefreshRead(provider=provider_name, discovered_count=len(discovered), eligible_count=len(models),
+        registered_count=len(models), created_count=created_count, updated_count=updated_count,
+        deactivated_count=deactivated_count, excluded_count=max(0, len(discovered) - len(models)),
+        excluded_reasons=excluded_reasons, models=models)
 
 # ---------------------------------------------------------------------------
 # GET /models — filtered by the user's enabled ProviderConfiguration rows
