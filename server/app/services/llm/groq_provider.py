@@ -5,6 +5,7 @@ from fastapi import HTTPException
 
 from app.services.llm.base import LLMProvider
 from app.services.llm.errors import provider_error
+from app.services.llm.free_model_policy import is_verified_free_model
 
 log = logging.getLogger(__name__)
 
@@ -68,11 +69,15 @@ class GroqProvider(LLMProvider):
             raise HTTPException(401, "Provider authentication failed")
         try:
             models = _client(api_key).models.list()
-            return [
-                {"model_key": m.id, "display_name": m.id, "is_local": False,
-                 "context_length": getattr(m, "context_window", None), "is_free": None}
-                for m in models.data if getattr(m, "active", True) and _supports_chat_completions(m)
-            ]
+            result = []
+            for model in models.data:
+                if not getattr(model, "active", True) or not _supports_chat_completions(model):
+                    continue
+                item = {"model_key": model.id, "display_name": model.id, "is_local": False,
+                        "context_length": getattr(model, "context_window", None), "is_free": True}
+                if is_verified_free_model("groq", item):
+                    result.append(item)
+            return result
         except HTTPException:
             raise
         except Exception as exc:
@@ -110,3 +115,4 @@ class GroqProvider(LLMProvider):
             raise
         except Exception as exc:
             _safe_raise(exc, model_key)
+
