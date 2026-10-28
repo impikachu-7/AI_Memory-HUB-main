@@ -115,4 +115,3 @@ class GroqProvider(LLMProvider):
             raise
         except Exception as exc:
             _safe_raise(exc, model_key)
-
