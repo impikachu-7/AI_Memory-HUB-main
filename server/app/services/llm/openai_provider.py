@@ -51,7 +51,7 @@ class OpenAIProvider(LLMProvider):
         try:
             models = _client(api_key).models.list()
             return [
-                {"model_key": m.id, "display_name": m.id, "is_local": False}
+                {"model_key": m.id, "display_name": m.id, "is_local": False, "is_free": False}
                 for m in models.data
                 if "gpt" in m.id or "o1" in m.id or "o3" in m.id or "o4" in m.id
                 if _supports_chat_completions(m.id)
@@ -93,3 +93,4 @@ class OpenAIProvider(LLMProvider):
             raise
         except Exception as exc:
             _safe_raise(exc, model_key)
+
