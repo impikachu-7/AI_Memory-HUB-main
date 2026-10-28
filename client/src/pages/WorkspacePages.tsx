@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 26073)
-Total output lines: 949
-
 /** Quiet Intelligence Console workbench: clear user controls, styled illustrative data, and no simulated backend persistence. */
 import { api } from "@/services/api";
 import { AppShell, NewConversationButton } from "@/components/AppShell";
@@ -255,6 +252,7 @@ function ChatPage() {
       provider: selectedModel.provider,
       model_key: selectedModel.model_key,
     };
+
     const generationConversationId = activeConvId;
     const generationModel = selectedModel;
     let streamedResponse = "";
@@ -282,12 +280,10 @@ function ChatPage() {
           model_id: generationModel.model_key,
           created_at: new Date().toISOString(),
         };
-        if (activeConvIdRef.current === generationConversationId) {
-          setMessagesList((prev) => prev.some((msg) => msg.id === messageId) ? prev : [...prev, assistantMessage]);
-          void api.conversations.listMessages(generationConversationId).then((msgs) => {
-            if (activeConvIdRef.current === generationConversationId) setMessagesList(msgs);
-          }).catch(() => undefined);
-        }
+        setMessagesList((prev) => prev.some((msg) => msg.id === messageId) ? prev : [...prev, assistantMessage]);
+        void api.conversations.listMessages(generationConversationId).then((msgs) => {
+          if (activeConvIdRef.current === generationConversationId) setMessagesList(msgs);
+        }).catch(() => undefined);
       },
       (err) => {
         if (activeConvIdRef.current !== generationConversationId) return;
@@ -296,7 +292,9 @@ function ChatPage() {
         setErrorMsg(err.message || "An error occurred");
       },
       (generationAbortRef.current = new AbortController()).signal,
-      (status) => setGenerationStatus(status),
+      (status) => {
+        if (activeConvIdRef.current === generationConversationId) setGenerationStatus(status);
+      },
     );
   };
 
@@ -467,7 +465,254 @@ function MemoryDetailsPage() {
                 <span className="flex items-center gap-3">
                   <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-card">
                     <MessageSquareText className="h-4 w-4 text-[color:var(--memory-teal)]" />
-        …6073 tokens truncated…ace. User-scoped data stays connected to this identity, not an AI provider." action={<Button onClick={() => backendToast("Saving profile changes")}><Check className="h-4 w-4" /> Save changes</Button>} /><div className="grid gap-6 lg:grid-cols-[0.7fr_1.3fr]"><Panel className="p-6"><span className="flex h-20 w-20 items-center justify-center rounded-[24px] bg-[color:var(--memory-teal)] text-xl font-bold text-white">AM</span><h3 className="font-display mt-5 text-xl font-semibold tracking-[-0.04em]">Alex Morgan</h3><p className="mt-1 text-xs text-muted-foreground">Personal workspace</p><Button variant="secondary" className="mt-6 w-full" onClick={() => backendToast("Changing profile photo")}><UserRound className="h-4 w-4" /> Change avatar</Button></Panel><Panel className="p-6"><div className="grid gap-5 sm:grid-cols-2"><label className="block"><span className="mb-2 block text-xs font-bold">Full name</span><input defaultValue="Alex Morgan" className="h-10 w-full rounded-xl border border-input bg-background px-3 text-xs outline-none focus:border-[color:var(--memory-teal)]" /></label><label className="block"><span className="mb-2 block text-xs font-bold">Email address</span><input defaultValue="alex@example.com" type="email" className="h-10 w-full rounded-xl border border-input bg-background px-3 text-xs outline-none focus:border-[color:var(--memory-teal)]" /></label></div><div className="mt-6 border-t border-border pt-6"><IndexLabel>Account security</IndexLabel><div className="mt-4 flex items-center justify-between rounded-xl border border-border bg-[color:var(--surface-warm)] p-4"><span><span className="block text-xs font-bold">Email verified</span><span className="mt-1 block text-[10px] text-muted-foreground">Verified on Aug 16, 2026</span></span><Pill tone="teal"><Check className="h-3 w-3" /> Verified</Pill></div></div></Panel></div></div></AppShell>; }
+                  </span>
+
+                  <span>
+                    <span className="block text-xs font-bold">
+                      {memory.source}
+                    </span>
+
+                    <span className="mt-1 block text-[10px] text-muted-foreground">
+                      Conversation record · Aug 16, 2026
+                    </span>
+                  </span>
+                </span>
+
+                <ExternalLink className="h-4 w-4 text-muted-foreground" />
+              </Link>
+            </div>
+          </Panel>
+
+          <div className="space-y-4">
+            <Panel className="p-5">
+              <IndexLabel>Record state</IndexLabel>
+
+              <div className="mt-4 space-y-4 text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="text-muted-foreground">Created</span>
+                  <span className="font-bold">{memory.createdAt}</span>
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <span className="text-muted-foreground">Last updated</span>
+                  <span className="font-bold">{memory.updatedAt}</span>
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <span className="text-muted-foreground">Status</span>
+                  <Pill tone="teal">Active</Pill>
+                </div>
+              </div>
+            </Panel>
+
+            <Panel className="p-3">
+              <Button
+                variant="secondary"
+                className="w-full justify-start"
+                onClick={handleArchive}
+              >
+                <Archive className="h-4 w-4" />
+                Archive memory
+              </Button>
+
+              <Button
+                variant="secondary"
+                className="mt-2 w-full justify-start"
+                onClick={handlePin}
+              >
+                <Pin className="h-4 w-4" />
+                Pin as important
+              </Button>
+
+              <Button
+                variant="secondary"
+                className="mt-2 w-full justify-start text-red-600 hover:bg-red-500/10 hover:text-red-700 dark:text-red-400"
+                onClick={handleDelete}
+              >
+                <Trash2 className="h-4 w-4" />
+                Delete memory
+              </Button>
+            </Panel>
+          </div>
+        </div>
+      </div>
+    </AppShell>
+  );
+}
+function ModelSelectorPage() {
+  const [availableModels, setAvailableModels] = useState<ModelRead[]>([]);
+  const [selectedModel, setSelectedModel] = useState<ModelRead | null>(null);
+  const [conversationsList, setConversationsList] = useState<ConversationSummary[]>([]);
+  const [activeConvId, setActiveConvId] = useState<string | null>(null);
+
+  useEffect(() => {
+    const loadModels = async () => {
+      try {
+        const [mods, convs] = await Promise.all([api.models.listRegistry(), api.conversations.list()]);
+        let mergedModels = mods.filter((model) => !(model.provider === "ollama" && model.model_key === "ollama/local"));
+        try {
+          const local = await api.localConnector.models();
+          if (local.models.length) {
+            const registered = await api.providers.registerLocalModels(
+              local.models.map((model) => ({ model_key: model.name, display_name: model.name }))
+            );
+            const nonDuplicateLocal = registered.filter(
+              (model) => !mergedModels.some((existing) => existing.id === model.id)
+            );
+            mergedModels = [...mergedModels, ...nonDuplicateLocal];
+          }
+        } catch (error) {
+          console.warn("Local Ollama models are unavailable:", error);
+          const detail = error instanceof Error ? error.message : "Local Ollama model registration is unavailable.";
+          toast.warning(`Ollama detected locally, but model registration failed: ${detail}`);
+        }
+        setAvailableModels(mergedModels);
+        setConversationsList(convs);
+        setActiveConvId(convs[0]?.id ?? null);
+        if (mergedModels.length > 0) setSelectedModel(mergedModels[0]);
+      } catch (error) {
+        console.error("Failed to load available models:", error);
+        toast.error("Failed to load available models");
+      }
+    };
+    void loadModels();
+  }, []);
+
+const handleSelectModel = async (model: ModelRead) => {
+  setSelectedModel(model);
+
+  if (!activeConvId) {
+    console.error("NO ACTIVE CONVERSATION");
+    toast.error("No active conversation");
+    return;
+  }
+
+  try {
+    await api.conversations.update(activeConvId, {
+      selected_model_id: model.id,
+    });
+
+    setConversationsList((prev) =>
+      prev.map((conversation) =>
+        conversation.id === activeConvId
+          ? {
+              ...conversation,
+              selected_model_id: model.id,
+            }
+          : conversation
+      )
+    );
+
+    toast.success(`Selected model: ${model.display_name}`);
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : "Failed to save model selection");
+  }
+};
+
+  const grouped = availableModels.reduce<Record<string, ModelRead[]>>((acc, model) => {
+    (acc[model.provider] ??= []).push(model);
+    return acc;
+  }, {});
+
+  return <AppShell title="AI Model Selector" eyebrow="Models"><div className="mx-auto max-w-[1060px]"><PageIntro label="Your deliberate choice" title="Use the model you intend to use" copy="Only providers and models configured and enabled for your account are available here. Selecting one here does not silently switch a provider." /><div className="grid gap-6 lg:grid-cols-[0.7fr_1.3fr]"><Panel className="bg-[color:var(--ink-soft)] p-6 text-white"><Pill tone="dark"><span className="h-1.5 w-1.5 rounded-full bg-[color:var(--memory-teal-light)]" /> Current selection</Pill><p className="font-display mt-6 text-[29px] font-semibold tracking-[-0.055em]">{selectedModel?.display_name || "None selected"}</p><p className="mt-2 text-sm text-white/60">{selectedModel?.provider} · {selectedModel?.model_key || "No model active"}</p><div className="mt-8 border-t border-white/10 pt-5"><p className="text-xs font-bold">Your context stays intact</p><p className="mt-2 text-xs leading-5 text-white/60">Model changes are explicit. Conversation history and long-term memory remain attached to your workspace, not the model.</p></div></Panel><div className="space-y-4">{Object.entries(grouped).map(([provider, models]) => <Panel key={provider} className="overflow-hidden"><div className="flex items-center justify-between border-b border-border px-5 py-4"><span className="flex items-center gap-3"><span className="flex h-9 w-9 items-center justify-center rounded-xl bg-[color:color-mix(in_oklab,var(--memory-teal)_10%,transparent)]"><Bot className="h-4 w-4 text-[color:var(--memory-teal)]" /></span><span><span className="block text-sm font-bold uppercase">{provider === "nvidia" ? "NVIDIA NIM" : provider}</span><span className="mt-0.5 block text-[10px] text-muted-foreground">Configured and available</span></span></span><Pill tone="teal">{models.length} models</Pill></div><div className="p-2">{models.map((model) => <button key={model.id} onClick={() => handleSelectModel(model)} className={cn("flex w-full items-center justify-between rounded-xl px-3 py-3 text-left transition hover:bg-secondary", selectedModel?.id === model.id && "bg-[color:color-mix(in_oklab,var(--memory-teal)_8%,transparent)]")}><span><span className="flex items-center gap-2 text-xs font-bold">{model.display_name}{model.is_local && <Pill tone="neutral">Local</Pill>}{model.is_free === true && <Pill tone="teal">Free</Pill>}</span><span className="mt-1 block text-[10px] text-muted-foreground">{model.model_key}</span></span>{selectedModel?.id === model.id ? <span className="flex h-5 w-5 items-center justify-center rounded-full bg-[color:var(--memory-teal)]"><Check className="h-3 w-3 text-white" /></span> : <span className="h-5 w-5 rounded-full border border-border" />}</button>)}</div></Panel>)}</div></div><Panel className="mt-6 border-dashed bg-[color:var(--surface-warm)] p-5"><div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between"><div><p className="text-sm font-bold">Need another provider?</p><p className="mt-1 text-xs leading-5 text-muted-foreground">Configure OpenAI, Anthropic, DeepSeek, Groq, OpenRouter, NVIDIA NIM, or KIE in Provider Settings. Ollama connects locally.</p></div><Link href="/settings/providers"><Button variant="secondary">Provider settings <ArrowRight className="h-4 w-4" /></Button></Link></div></Panel></div></AppShell>; }
+
+const ALL_PROVIDERS = [
+  { id: "gemini", name: "Google Gemini", detail: "Connect to Google Gemini API" },
+  { id: "openai", name: "OpenAI", detail: "Connect to official OpenAI API" },
+  { id: "anthropic", name: "Anthropic Claude", detail: "Connect to Anthropic Claude API" },
+  { id: "deepseek", name: "DeepSeek", detail: "Connect to DeepSeek API" },
+  { id: "groq", name: "Groq", detail: "Connect to Groq Cloud API" },
+  { id: "openrouter", name: "OpenRouter", detail: "Connect to OpenRouter API" },
+  { id: "kie", name: "KIE", detail: "Users provide their own KIE API key" },
+  { id: "nvidia", name: "NVIDIA NIM", detail: "Users provide their own NVIDIA API key" },
+  { id: "ollama", name: "Ollama", detail: "Runs locally; no API key required", local: true },
+];
+
+function ProvidersPage() {
+  const [configuredList, setConfiguredList] = useState<ProviderRead[]>([]);
+  const [keyDrafts, setKeyDrafts] = useState<Record<string, string>>({});
+
+  const loadProviders = () => {
+    api.providers.listConfigured()
+      .then(setConfiguredList)
+      .catch(() => toast.error("Failed to load configured providers"));
+  };
+
+  useEffect(() => {
+    loadProviders();
+  }, []);
+
+  const handleSaveKey = async (providerId: string) => {
+    const key = keyDrafts[providerId]?.trim();
+    if (!key) { toast.error("Enter an API key first"); return; }
+    try {
+      if (configuredList.some((item) => item.provider === providerId)) await api.providers.update(providerId, { api_key: key, is_enabled: true });
+      else await api.providers.configure(providerId, key, true);
+      setKeyDrafts((current) => ({ ...current, [providerId]: "" }));
+      toast.success(`${providerId} key saved securely`);
+      loadProviders();
+    } catch (e: any) { toast.error(e.message || "Failed to save provider key"); }
+  };
+
+  const handleRefreshModels = async (providerId: string) => {
+    try { const models = await api.providers.listModels(providerId); toast.success(`${models.length} ${providerId} models refreshed`); }
+    catch (e: any) { toast.error(e.message || "Failed to refresh provider models"); }
+  };
+
+  const handleDisconnect = async (providerId: string) => {
+    if (!window.confirm(`Disconnect ${providerId}? This will remove its provider configuration.`)) return;
+    try {
+      await api.providers.remove(providerId);
+      toast.success(`${providerId} disconnected`);
+      loadProviders();
+    } catch (e: any) {
+      toast.error(e.message || "Failed to disconnect provider");
+    }
+  };
+
+  const handleToggle = async (providerId: string, currentEnabled: boolean) => {
+    try {
+      await api.providers.update(providerId, { is_enabled: !currentEnabled });
+      toast.success(`${providerId} ${!currentEnabled ? "enabled" : "disabled"}`);
+      loadProviders();
+    } catch (e: any) {
+      toast.error(e.message || "Failed to update provider status");
+    }
+  };
+
+  const handleTest = async (providerId: string) => {
+    try {
+      if (providerId === "ollama") {
+        const status = await api.localConnector.status();
+        if (!status.connected) {
+          throw new Error("Ollama is not available. Start the local connector and Ollama on this computer.");
+        }
+        const localModels = await api.localConnector.models();
+        toast.success(`Ollama is connected · ${localModels.models.length} local model${localModels.models.length === 1 ? "" : "s"} found`);
+        return;
+      }
+      await api.providers.test(providerId);
+      toast.success(`${providerId} connection test passed`);
+    } catch (e: any) {
+      toast.error(e?.message || "Provider test failed");
+    }
+  };
+
+  return <AppShell title="AI Provider Settings" eyebrow="Control center"><div className="mx-auto max-w-[1050px]"><PageIntro label="Provider connections" title="Connect only what you want to use" copy="Credentials belong on the backend. This browser interface never displays or stores a provider secret in plaintext." action={<Link href="/settings/api-keys"><Button variant="secondary"><KeyRound className="h-4 w-4" /> Credential vault</Button></Link>} /><div className="space-y-3">{ALL_PROVIDERS.map((provider) => {
+    const config = configuredList.find(c => c.provider === provider.id);
+    const isConnected = !!config;
+    const isEnabled = config?.is_enabled ?? false;
+
+    return <Panel key={provider.id} className="flex flex-col gap-4 p-4 sm:p-5"><div className="flex items-center gap-4"><span className={cn("flex h-11 w-11 items-center justify-center rounded-xl", isConnected && isEnabled ? "bg-[color:color-mix(in_oklab,var(--memory-teal)_12%,transparent)]" : "bg-secondary")}><Globe2 className={cn("h-5 w-5", isConnected && isEnabled ? "text-[color:var(--memory-teal)]" : "text-muted-foreground")} /></span><span><span className="flex items-center gap-2"><span className="text-sm font-bold">{provider.name}</span><Pill tone={isConnected && isEnabled ? "teal" : "neutral"}>{isConnected ? (isEnabled ? "Connected & Enabled" : "Connected (Disabled)") : "Not Configured"}</Pill></span><span className="mt-1 block text-[11px] text-muted-foreground">{provider.detail}</span></span></div>{provider.id === "ollama" ? <><p className="text-xs text-muted-foreground">No API key required. Uses the local Ollama connector.</p>{!isConnected && <Button onClick={async () => { try { await api.providers.configure("ollama", null, true); loadProviders(); } catch (e: any) { toast.error(e.message || "Failed to enable Ollama"); } }}>Enable Ollama</Button>}</> : <><label className="block"><span className="mb-1.5 block text-xs font-semibold">API Key</span><input type="password" autoComplete="new-password" value={keyDrafts[provider.id] ?? ""} onChange={(event) => setKeyDrafts((current) => ({ ...current, [provider.id]: event.target.value }))} placeholder={isConnected ? "Key saved · enter a new key to rotate" : `Enter your ${provider.name} API key`} className="h-10 w-full rounded-xl border border-input bg-background px-3 text-xs outline-none focus:border-[color:var(--memory-teal)]" /><span className="mt-1 block text-[10px] text-muted-foreground">Your API key is encrypted and stored securely.</span></label><Button onClick={() => void handleSaveKey(provider.id)}>Save</Button></>}{isConnected && <div className="flex flex-wrap gap-2"><Button variant="secondary" onClick={() => void handleTest(provider.id)}>Test Connection</Button>{provider.id !== "ollama" && <Button variant="secondary" onClick={() => void handleRefreshModels(provider.id)}>Refresh Models</Button>}<Button variant="secondary" onClick={() => handleToggle(provider.id, isEnabled)}>{isEnabled ? "Disable" : "Enable"}</Button><Button variant="secondary" onClick={() => handleDisconnect(provider.id)}>Disconnect</Button></div>}</Panel>;
+  })}</div><Panel className="mt-6 p-5"><div className="flex gap-3"><ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-[color:var(--memory-teal)]" /><div><p className="text-sm font-bold">Provider availability governs model selection</p><p className="mt-1 text-xs leading-5 text-muted-foreground">Only a configured, healthy provider returns models to the selection screen. AI Memory Hub does not automatically fall back to another provider when a model is unavailable.</p></div></div></Panel></div></AppShell>; }
+
+function ApiKeysPage() { return <AppShell title="API Key Management" eyebrow="Control center"><div className="mx-auto max-w-[970px]"><PageIntro label="Credential vault" title="Keep provider credentials off the client" copy="Provider credentials are designed to be encrypted and handled by the FastAPI backend. This screen shows connection state and last use—not a raw secret." action={<Button onClick={() => backendToast("Adding a credential")}><Plus className="h-4 w-4" /> Add credential</Button>} /><Panel className="overflow-hidden"><div className="grid grid-cols-[1.2fr_1fr_0.8fr_auto] gap-4 border-b border-border bg-[color:var(--surface-warm)] px-5 py-3 text-[10px] font-bold uppercase tracking-[0.12em] text-muted-foreground"><span>Provider</span><span>Key state</span><span>Last used</span><span /></div>{[['Google', 'Encrypted and available', 'Today, 10:41'], ['Ollama', 'Local connection — no cloud key', 'Today, 10:40'], ['OpenAI', 'Not configured', '—']].map(([provider, state, used]) => <div key={provider} className="grid grid-cols-[1.2fr_1fr_0.8fr_auto] items-center gap-4 border-b border-border px-5 py-4 last:border-0"><span className="flex items-center gap-2 text-xs font-bold"><KeyRound className="h-4 w-4 text-[color:var(--memory-teal)]" /> {provider}</span><span><Pill tone={state.includes('available') || state.includes('Local') ? 'teal' : 'neutral'}>{state}</Pill></span><span className="text-[11px] text-muted-foreground">{used}</span><IconButton label={`Manage ${provider} credential`} onClick={() => backendToast(`Managing ${provider} credential`)}><MoreHorizontal className="h-4 w-4" /></IconButton></div>)}</Panel><div className="mt-5 grid gap-4 sm:grid-cols-2"><Panel className="p-5"><LockKeyhole className="h-5 w-5 text-[color:var(--memory-teal)]" /><p className="mt-4 text-sm font-bold">No plaintext in the browser</p><p className="mt-2 text-xs leading-5 text-muted-foreground">The frontend only receives credential status. Secrets never appear in components, local storage, logs, or network-facing markup.</p></Panel><Panel className="p-5"><ShieldAlert className="h-5 w-5 text-amber-600 dark:text-amber-400" /><p className="mt-4 text-sm font-bold">Rotation stays explicit</p><p className="mt-2 text-xs leading-5 text-muted-foreground">Credential rotation and removal need an authenticated backend action, with clear provider-specific confirmation.</p></Panel></div></div></AppShell>; }
+
+function AnalyticsPage() { return <AppShell title="Analytics Dashboard" eyebrow="Control center"><div className="mx-auto max-w-[1200px]"><PageIntro label="Workspace activity" title="Understand the shape of your memory" copy="Activity figures help you review usage patterns. They are informational and never change what memory is retrieved." action={<Button variant="secondary"><CalendarClock className="h-4 w-4" /> Last 30 days <ChevronDown className="h-3.5 w-3.5" /></Button>} /><div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4"><StatCard label="Total memories" value="128" detail="Across 6 categories" icon={BrainCircuit} trend="+12" /><StatCard label="Conversations" value="46" detail="11 with retrieved memory" icon={MessageSquareText} trend="+8" /><StatCard label="Retrieval activity" value="72%" detail="Sessions with context used" icon={Gauge} trend="+4%" /><StatCard label="Models used" value="4" detail="Across 2 providers" icon={Bot} /></div><div className="mt-6 grid gap-6 lg:grid-cols-[1.4fr_0.9fr]"><Panel className="p-5"><div className="flex items-start justify-between"><div><p className="text-sm font-bold">Memory growth</p><p className="mt-1 text-[11px] text-muted-foreground">Long-term records created over time</p></div><Pill tone="teal">+12 this month</Pill></div><div className="mt-8 flex h-[220px] items-end gap-2">{[28, 33, 37, 34, 46, 49, 58, 61, 64, 72, 78, 84].map((height, index) => <div key={index} className="group relative flex h-full flex-1 items-end"><span style={{ height: `${height}%` }} className="w-full rounded-t-md bg-[color:color-mix(in_oklab,var(--memory-teal)_18%,transparent)] transition group-hover:bg-[color:var(--memory-teal)]" /><span className="absolute -bottom-5 left-1/2 -translate-x-1/2 text-[9px] text-muted-foreground">{index % 2 === 0 ? `W${index + 1}` : ''}</span></div>)}</div></Panel><Panel className="p-5"><p className="text-sm font-bold">Provider usage</p><p className="mt-1 text-[11px] text-muted-foreground">Requests by configured provider</p><div className="mt-7 space-y-5">{[['Google', '68%', '68'], ['Ollama', '32%', '32']].map(([name, value, width]) => <div key={name}><div className="flex justify-between text-xs"><span className="font-bold">{name}</span><span className="text-muted-foreground">{value}</span></div><div className="mt-2 h-2 overflow-hidden rounded-full bg-secondary"><span style={{ width: `${width}%` }} className="block h-full rounded-full bg-[color:var(--memory-teal)]" /></div></div>)}</div><div className="mt-7 border-t border-border pt-5"><p className="index-label">Model usage</p>{[['Gemini 2.5 Pro', '41%'], ['Gemini 2.5 Flash', '27%'], ['Qwen 2.5 14B', '20%'], ['Llama 3.3 70B', '12%']].map(([name, value]) => <div key={name} className="mt-3 flex justify-between text-[11px]"><span className="font-bold">{name}</span><span className="text-muted-foreground">{value}</span></div>)}</div></Panel></div></div></AppShell>; }
+
+function PrivacyPage() { const actions = [{ icon: Download, title: "Export memories", copy: "Request a portable export of your long-term memory records.", action: "Prepare memory export", variant: "secondary" as const }, { icon: Trash2, title: "Delete selected memories", copy: "Choose specific records to remove after authenticated confirmation.", action: "Choose memories", variant: "secondary" as const }, { icon: Archive, title: "Delete all memories", copy: "Permanently remove your full long-term memory layer. This requires deliberate confirmation.", action: "Delete all memories", variant: "danger" as const }, { icon: FileText, title: "Export conversations", copy: "Request the complete conversation history separately from memory.", action: "Prepare conversation export", variant: "secondary" as const }, { icon: MessageSquareText, title: "Delete conversations", copy: "Remove selected conversation records without altering separate memory unless you choose it.", action: "Manage conversations", variant: "secondary" as const }, { icon: KeyRound, title: "Remove provider credentials", copy: "Disconnect and revoke stored provider credentials through the secure backend vault.", action: "Manage credentials", variant: "secondary" as const }]; return <AppShell title="Privacy Center" eyebrow="Control center"><div className="mx-auto max-w-[1100px]"><PageIntro label="Your data controls" title="Control the record, on your terms" copy="Privacy actions are kept visible and separate. Memory, conversations, and provider credentials each have their own scope of control." /><Panel className="mb-6 border-[color:color-mix(in_oklab,var(--memory-teal)_28%,transparent)] bg-[color:color-mix(in_oklab,var(--memory-teal)_6%,transparent)] p-5"><div className="flex gap-4"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[color:var(--memory-teal)]"><ShieldCheck className="h-5 w-5 text-white" /></span><div><p className="text-sm font-bold">Memory is not model property</p><p className="mt-1 text-xs leading-5 text-muted-foreground">A future FastAPI backend must scope every conversation and vector query to the authenticated user. The selected model receives only the controlled context needed for the active request.</p></div></div></Panel><div className="grid gap-4 md:grid-cols-2">{actions.map(({ icon: Icon, title, copy, action, variant }) => <Panel key={title} className="p-5"><Icon className={cn("h-5 w-5", variant === 'danger' ? 'text-red-600 dark:text-red-400' : 'text-[color:var(--memory-teal)]')} /><h3 className="font-display mt-4 text-lg font-semibold tracking-[-0.035em]">{title}</h3><p className="mt-2 min-h-10 text-xs leading-5 text-muted-foreground">{copy}</p><Button variant={variant} className="mt-5" onClick={() => backendToast(action)}>{action} <ArrowRight className="h-3.5 w-3.5" /></Button></Panel>)}</div></div></AppShell>; }
+
+function ProfilePage() { return <AppShell title="User Profile" eyebrow="Control center"><div className="mx-auto max-w-[900px]"><PageIntro label="Personal workspace" title="Your profile and identity" copy="Your profile identifies the account that owns this workspace. User-scoped data stays connected to this identity, not an AI provider." action={<Button onClick={() => backendToast("Saving profile changes")}><Check className="h-4 w-4" /> Save changes</Button>} /><div className="grid gap-6 lg:grid-cols-[0.7fr_1.3fr]"><Panel className="p-6"><span className="flex h-20 w-20 items-center justify-center rounded-[24px] bg-[color:var(--memory-teal)] text-xl font-bold text-white">AM</span><h3 className="font-display mt-5 text-xl font-semibold tracking-[-0.04em]">Alex Morgan</h3><p className="mt-1 text-xs text-muted-foreground">Personal workspace</p><Button variant="secondary" className="mt-6 w-full" onClick={() => backendToast("Changing profile photo")}><UserRound className="h-4 w-4" /> Change avatar</Button></Panel><Panel className="p-6"><div className="grid gap-5 sm:grid-cols-2"><label className="block"><span className="mb-2 block text-xs font-bold">Full name</span><input defaultValue="Alex Morgan" className="h-10 w-full rounded-xl border border-input bg-background px-3 text-xs outline-none focus:border-[color:var(--memory-teal)]" /></label><label className="block"><span className="mb-2 block text-xs font-bold">Email address</span><input defaultValue="alex@example.com" type="email" className="h-10 w-full rounded-xl border border-input bg-background px-3 text-xs outline-none focus:border-[color:var(--memory-teal)]" /></label></div><div className="mt-6 border-t border-border pt-6"><IndexLabel>Account security</IndexLabel><div className="mt-4 flex items-center justify-between rounded-xl border border-border bg-[color:var(--surface-warm)] p-4"><span><span className="block text-xs font-bold">Email verified</span><span className="mt-1 block text-[10px] text-muted-foreground">Verified on Aug 16, 2026</span></span><Pill tone="teal"><Check className="h-3 w-3" /> Verified</Pill></div></div></Panel></div></div></AppShell>; }
 
 function SettingsPage() { const settings = [{ icon: Bell, title: "Notifications", copy: "Choose which workspace events need your attention.", control: "Enabled" }, { icon: SlidersHorizontal, title: "Memory retrieval", copy: "Review how retrieved memory will be presented before a model uses it.", control: "Review mode" }, { icon: ShieldCheck, title: "Session controls", copy: "Control active sessions and sign-in security from your authenticated account.", control: "Managed" }, { icon: LayoutDashboard, title: "Workspace defaults", copy: "Set a preferred entry point and local display choices for this workspace.", control: "Chat" }]; return <AppShell title="Application Settings" eyebrow="Control center"><div className="mx-auto max-w-[1000px]"><PageIntro label="Workspace preferences" title="Tune the workbench to your way of thinking" copy="Interface preferences are local to your account. They do not permit automatic model selection or alter your long-term memory without a clear action." /><div className="space-y-3">{settings.map(({ icon: Icon, title, copy, control }) => <Panel key={title} className="flex items-center gap-4 p-4 sm:p-5"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[color:color-mix(in_oklab,var(--memory-teal)_10%,transparent)]"><Icon className="h-4 w-4 text-[color:var(--memory-teal)]" /></span><span className="min-w-0 flex-1"><span className="block text-sm font-bold">{title}</span><span className="mt-1 block text-xs leading-5 text-muted-foreground">{copy}</span></span><button onClick={() => backendToast(`Changing ${title.toLowerCase()}`)} className="shrink-0 rounded-lg border border-border bg-background px-3 py-2 text-[11px] font-bold transition hover:bg-secondary">{control} <ChevronsUpDown className="ml-1 inline h-3 w-3" /></button></Panel>)}</div><Panel className="mt-6 border-dashed bg-[color:var(--surface-warm)]"><EmptyState icon={Settings2} title="More settings will appear with your connected backend" copy="Service configuration, security policies, and workspace defaults will remain explicit controls rather than hidden automatic behavior." /></Panel></div></AppShell>; }
 
