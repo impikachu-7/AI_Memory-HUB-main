@@ -102,4 +102,3 @@ class OllamaProvider(LLMProvider):
             raise
         except Exception as exc:
             _safe_raise(exc)
-
