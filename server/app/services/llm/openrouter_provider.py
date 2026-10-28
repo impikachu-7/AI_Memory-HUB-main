@@ -46,6 +46,8 @@ def _client(api_key: str):
             api_key=api_key,
             base_url=_BASE_URL,
             default_headers=_DEFAULT_HEADERS,
+            timeout=45.0,
+            max_retries=0,
         )
     except ImportError as exc:
         raise HTTPException(503, "openai SDK is not installed") from exc
